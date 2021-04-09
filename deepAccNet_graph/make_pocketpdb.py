@@ -31,19 +31,31 @@ def main(pdbskeys,
          nmax=1000000,
          proteinpdb='',
          inputpath='/net/scratch/hpark/PDBbindset/',
+         extrapath='',
          include_native=True):
-    
-    resnames,reschains,xyz = utils.read_pdb('%s/%s'%(inputpath,proteinpdb))
-    _, _, atms_aa, _ = utils.get_AAtype_properties(include_metal=True)
+
+    extra = {}
+    _, _, atms_aa, _, _ = utils.get_AAtype_properties(include_metal=True,extrapath=extrapath,extrainfo=extra)
+
+    print(inputpath+'/'+proteinpdb)
+    resnames,reschains,xyz = utils.read_pdb('%s/%s'%(inputpath,proteinpdb),
+                                            read_ligand=True,#cofactor if any
+                                            aas_disallowed=['LG1'])
 
     xyz_rec = []
     reschain_idx = []
     for i,resname in enumerate(resnames):
-        if resname not in utils.residues_and_metals:
+        if resname in extra:
+            iaa = len(utils.residues_and_metals)
+            atms = extra[resname][2]
+        elif resname in utils.residues_and_metals:
+            iaa = utils.residues_and_metals.index(resname)
+            atms = atms_aa[iaa]
+        else:
             print("unknown residue: %s, skip"%resname)
             continue
-        iaa = utils.residues_and_metals.index(resname)
-        for atm in atms_aa[iaa]:
+
+        for atm in atms:
             if atm not in xyz[reschains[i]]: continue
             xyz_rec.append(xyz[reschains[i]][atm])
             reschain_idx.append(reschains[i])

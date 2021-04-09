@@ -1,4 +1,5 @@
 import numpy as np
+import glob
 
 # Tip atom definitions
 AA_to_tip = {"ALA":"CB", "CYS":"SG", "ASP":"CG", "ASN":"CG", "GLU":"CD",
@@ -61,6 +62,12 @@ gentype2num = {'CS':0, 'CS1':1, 'CS2':2,'CS3':3,
                # Metals
                'Ca2p':57, 'Mg2p':58, 'Mn':59, 'Fe2p':60, 'Fe3p':60, 'Zn2p':61, 'Co2p':62, 'Cu2p':63, 'Cd':64}
 
+def find_gentype2num(at):
+    if at in gentype2num:
+        return gentype2num[at]
+    else:
+        return 0 # is this okay?
+
 # simplified idx
 gentype2simple = {'CS':0,'CS1':0,'CS3':0,'CST':0,'CSQ':0,'CSp':0,
                   'CD':1,'CD1':1,'CD2':1,'CDp':1,
@@ -80,16 +87,22 @@ gentype2simple = {'CS':0,'CS1':0,'CS3':0,'CST':0,'CSQ':0,'CSp':0,
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def read_params(p,as_list=False,ignore_hisH=True):
+def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
     atms = []
     qs = {}
     atypes = {}
     bnds = []
     
     is_his = False
+    repsatm = 0
     for l in open(p):
         words = l[:-1].split()
-        if l.startswith('AA') and 'HIS' in l: is_his = True
+        if l.startswith('AA'):
+            if 'HIS' in l: is_his = True
+        elif l.startswith('NAME'):
+            aaname_read = l[:-1].split()[-1]
+            if aaname != None and aaname_read != aaname: return False
+            
         if l.startswith('ATOM') and len(words) > 3:
             atm = words[1]
             atype = words[2]
@@ -107,22 +120,24 @@ def read_params(p,as_list=False,ignore_hisH=True):
             a1,a2 = words[1:3]
             if a1 not in atms or a2 not in atms: continue
             bnds.append((a1,a2))
+        elif l.startswith('NBR_ATOM'):
+            repsatm = atms.index(l[:-1].split()[-1])
             
-    # pass as string
-    #bnds = [[atms.index(a1),atms.index(a2)] for a1,a2 in bnds]
+    # bnds:pass as strings
             
     if as_list:
         qs = [qs[atm] for atm in atms]
         atypes = [atypes[atm] for atm in atms]
-    return atms,qs,atypes,bnds
+    return atms,qs,atypes,bnds,repsatm
 
-def read_pdb(pdb,read_ligand=False,aas_allowed=[]):
+def read_pdb(pdb,read_ligand=False,aas_allowed=[],
+             aas_disallowed=[]):
     resnames = []
     reschains = []
     xyz = {}
     
     for l in open(pdb):
-        if not l.startswith('ATOM') and not l.startswith('HETATM'): continue
+        if not (l.startswith('ATOM') or l.startswith('HETATM')): continue
         atm = l[12:17].strip()
         aa3 = l[17:20].strip()
 
@@ -131,17 +146,22 @@ def read_pdb(pdb,read_ligand=False,aas_allowed=[]):
         reschain = l[21]+'.'+l[22:27].strip()
 
         if aa3[:2] in METAL: aa3 = aa3[:2]
-        if atm == 'CA' or aa3 in METAL:
+        if aa3 in residues:
+            if atm == 'CA':
+                resnames.append(aa3)
+                reschains.append(reschain)
+        elif aa3 in METAL:
             resnames.append(aa3)
             reschains.append(reschain)
         elif read_ligand and reschain not in reschains:
+            resnames.append(aa3)
             reschains.append(reschain)
             
         if reschain not in xyz: xyz[reschain] = {}
         #if 'LG1' in l[30:54]:
         #    l = l.replace('LG1','000')
         xyz[reschain][atm] = [float(l[30:38]),float(l[38:46]),float(l[46:54])]
-        
+
     return resnames, reschains, xyz
 
 def read_ligand_pdb(pdb,ligres='LG1',read_H=False):
@@ -212,27 +232,49 @@ def fa2gentype(fats):
 
 def get_AAtype_properties(datapath='/software/rosetta/latest/database/chemical/residue_type_sets/fa_standard/residue_types',
                           include_metal=False,
-                          ignore_hisH=True):
+                          ignore_hisH=True,
+                          extrapath='',
+                          extrainfo={}):
     qs_aa = {}
     atypes_aa = {}
     atms_aa = {}
     bnds_aa = {}
+    repsatm_aa = {}
     for iaa,aa in enumerate(residues):
-        atms,q,atypes,bnds = read_params('%s/l-caa/%s.params'%(datapath,aa))
+        atms,q,atypes,bnds,_ = read_params('%s/l-caa/%s.params'%(datapath,aa))
         atypes_aa[iaa] = fa2gentype([atypes[atm] for atm in atms])
         qs_aa[iaa] = q
         atms_aa[iaa] = atms
         bnds_aa[iaa] = bnds
+        repsatm_aa[iaa] = atms.index('CA')
 
     if include_metal:
         for iaa,aa in enumerate(METAL):
             iaa += 20
-            atms,q,atypes,_ = read_params('%s/metal_ions/%s.params'%(datapath,aa))
+            atms,q,atypes,_,_ = read_params('%s/metal_ions/%s.params'%(datapath,aa))
             atypes_aa[iaa] = [atypes[atm] for atm in atms] #same atypes
             qs_aa[iaa] = q
             atms_aa[iaa] = atms
             bnds_aa[iaa] = []
-    return qs_aa, atypes_aa, atms_aa, bnds_aa
+            repsatm_aa[iaa] = 0
+
+    if extrapath != '':
+        params = glob.glob(extrapath+'/*params')
+        for p in params:
+            aaname = p.split('/')[-1].replace('.params','')
+            args = read_params(p,aaname=aaname)
+            if not args:
+                print("Failed to read extra params %s, ignore."%p)
+                continue
+            else:
+                #print("Read %s for the extra res params for %s"%(p,aaname))
+                pass
+            atms,q,atypes,bnds,repsatm = args
+            atypes = [atypes[atm] for atm in atms] #same atypes
+            extrainfo[aaname] = (q,atypes,atms,bnds,repsatm)
+    if extrainfo != {}:
+        print("Extra residues read from %s: "%extrapath, list(extrainfo.keys()))
+    return qs_aa, atypes_aa, atms_aa, bnds_aa, repsatm_aa
 
 def read_sasa(f,reschains):
     read_cont = False
@@ -265,3 +307,10 @@ def read_sasa(f,reschains):
             sasa[res] = 0.25
             cbcount[res] = 0.5
     return cbcount, sasa
+
+def upsample1(fnat):
+    over06 = fnat>0.6
+    over07 = fnat>0.7
+    over08 = fnat>0.8
+    p = over06 + over07 + over08 + 1.0 #weight of 1,2,3,4
+    return p/np.sum(p)

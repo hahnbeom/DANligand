@@ -27,10 +27,12 @@ def per_atm_lddt(xyz_lig,xyz_rec,dco,contact):
         lddt_per_atm[i] /= (len(col)+0.001)*4.0
     return fnat, lddt_per_atm
 
-def featurize_target_properties(inputpath,outf,store_npz):
+def featurize_target_properties(inputpath,outf,store_npz,extrapath=""):
     # get receptor info
-    resnames,reschains,xyz = utils.read_pdb('%s/pocket.pdb'%(inputpath))
-    qs_aa, atypes_aa, atms_aa, bnds_aa = utils.get_AAtype_properties(include_metal=True)
+    extra = {}
+    qs_aa, atypes_aa, atms_aa, bnds_aa, repsatm_aa = utils.get_AAtype_properties(include_metal=True,extrapath=extrapath,
+                                                                                 extrainfo=extra)
+    resnames,reschains,xyz = utils.read_pdb('%s/pocket.pdb'%(inputpath),read_ligand=True,aas_disallowed=["LG1"])
     
     # read in only heavy + hpol atms as lists
     q_rec = []
@@ -38,38 +40,44 @@ def featurize_target_properties(inputpath,outf,store_npz):
     xyz_rec = []
     atmres_rec = []
     aas_rec = []
+    bnds_rec = []
     repsatm_idx = []
     residue_idx = []
     atmnames = []
-    
+    resnames_read = []
+
     for i,resname in enumerate(resnames):
-        iaa = utils.residues_and_metals.index(resname)
         reschain = reschains[i]
         
+        if resname in extra:
+            iaa = len(utils.residues_and_metals)
+            qs, atypes, atms, bnds_, repsatm = extra[resname]
+        elif resname in utils.residues_and_metals:
+            iaa = utils.residues_and_metals.index(resname)
+            qs, atypes, atms, bnds_, repsatm = (qs_aa[iaa], atypes_aa[iaa], atms_aa[iaa], bnds_aa[iaa], repsatm_aa[iaa])
+        else:
+            print("unknown residue: %s, skip"%resname)
+            continue
+            
         natm = len(xyz_rec)
         atms_r = []
-        for iatm,atm in enumerate(atms_aa[iaa]):
-            is_repsatm = False
-            if iaa> 19:
-                print("detected metal: ", iaa, reschain)
-                is_repsatm = True
-            elif atm == 'CA':
-                is_repsatm = True
-                
+        for iatm,atm in enumerate(atms):
+            is_repsatm = (iatm == repsatm)
+            
             if atm not in xyz[reschain]:
                 if is_repsatm: return False
                 continue
 
             atms_r.append(atm)
-            q_rec.append(qs_aa[iaa][atm])
-            atypes_rec.append(atypes_aa[iaa][iatm])
+            q_rec.append(qs[atm])
+            atypes_rec.append(atypes[iatm])
             aas_rec.append(iaa)
             xyz_rec.append(xyz[reschain][atm])
             atmres_rec.append((reschain,atm))
             residue_idx.append(i)
             if is_repsatm: repsatm_idx.append(natm+iatm)
 
-        bnds = [[atms_r.index(atm1),atms_r.index(atm2)] for atm1,atm2 in bnds_aa[iaa] if atm1 in atms_r and atm2 in atms_r]
+        bnds = [[atms_r.index(atm1),atms_r.index(atm2)] for atm1,atm2 in bnds_ if atm1 in atms_r and atm2 in atms_r]
 
         # make sure all bonds are right
         for (i1,i2) in copy.copy(bnds):
@@ -81,10 +89,11 @@ def featurize_target_properties(inputpath,outf,store_npz):
                 
         bnds = np.array(bnds,dtype=int)
         atmnames.append(atms_r)
+        resnames_read.append(resname)
 
         if i == 0:
             bnds_rec = bnds
-        elif bnds_aa[iaa] != []:
+        elif bnds_ != []:
             bnds += natm
             bnds_rec = np.concatenate([bnds_rec,bnds])
             
@@ -110,6 +119,7 @@ def featurize_target_properties(inputpath,outf,store_npz):
                  repsatm_idx=repsatm_idx,
                  reschains=reschains,
                  atmnames=atmnames,
+                 resnames=resnames_read,
         )
     
     return xyz_rec, atmres_rec
@@ -130,6 +140,7 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
          paramspath = '',
          store_npz=True,
          same_answer=True,
+         extrapath='',
          debug=False):
 
     #inputpath = './'
@@ -140,11 +151,12 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
     # featurize target properties_
     args = featurize_target_properties(inputpath+tag,
                                        '%s/%s.prop.npz'%(outpath,tag),
-                                       store_npz)
+                                       store_npz,
+                                       extrapath=extrapath)
     xyz_rec0,atmres_rec = args
 
     if same_answer and os.path.exists('%s/LG.params'%(inputpath+tag)):
-        ligatms,_q_lig,_atypes_lig,bnds_lig = utils.read_params('%s/LG.params'%(inputpath+tag),as_list=True)
+        ligatms,_q_lig,_atypes_lig,bnds_lig,repsatm_lig = utils.read_params('%s/LG.params'%(inputpath+tag),as_list=True)
         _, _, _xyz_lig = utils.read_pdb('%s/ligand.pdb'%(inputpath+tag))
         _xyz_lig = np.array([_xyz_lig['X.1'][atm] for atm in ligatms])
         _bnds_lig = np.array([[ligatms.index(a1),ligatms.index(a2)] for a1,a2 in bnds_lig],dtype=int)
@@ -169,6 +181,10 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
         ligpdbs += ['%s/decoy.cross%03d.pdb'%(inputpath+tag,k) for k in range(30) \
                     if os.path.exists('%s/decoy.cross%03d.pdb'%(inputpath+tag,k))]
         decoytypes.remove('cross')
+    if 'CM' in decoytypes:
+        ligpdbs += ['%s/decoy.CM%03d.pdb'%(inputpath+tag,k) for k in range(50) \
+                    if os.path.exists('%s/decoy.CM%03d.pdb'%(inputpath+tag,k))]
+        decoytypes.remove('CM')
 
     if decoytypes != []:
         for t in decoytypes:
@@ -190,6 +206,7 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
     q_lig = []
     atypes_lig = []
     bnds_lig = []
+    repsatm_lig = []
     chainres = []
     
     nfail = 0
@@ -198,7 +215,7 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
         pname = pdb.split('/')[-1][:-4]
 
         try:
-            ligatms,_q_lig,_atypes_lig,_bnds_lig = utils.read_params(p,as_list=True)
+            ligatms,_q_lig,_atypes_lig,_bnds_lig,_repsatm_lig = utils.read_params(p,as_list=True)
             _, reschains, _xyz = utils.read_pdb(pdb,read_ligand=True)
             ligres = reschains[-1]
             _xyz_lig = np.array([_xyz[ligres][atm] for atm in ligatms])
@@ -214,14 +231,19 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
             print("Error occured while reading %s: skip."%pdb)
             nfail += 1
             if debug:
-                ligatms,_q_lig,_atypes_lig,_bnds_lig = utils.read_params(p,as_list=True)
+                ligatms,_q_lig,_atypes_lig,_bnds_lig,_repsatm_lig = utils.read_params(p,as_list=True)
                 _, reschains, _xyz = utils.read_pdb(pdb,read_ligand=True)
                 ligres = reschains[-1]
                 _xyz_lig = np.array([_xyz[ligres][atm] for atm in ligatms])
-                _xyz_rec = np.array([_xyz[res][atm] for res,atm in atmres_rec])
+                for res,atm in atmres_rec:
+                    if atm not in _xyz[res]:
+                        print("missing atm!", res, atm)
+                        
+                    #_xyz_rec = np.array([_xyz[res][atm] for res,atm in atmres_rec])
                 _chainres = [ligres for _ in _xyz_lig] + [res for res,atm in atmres_rec]
                 # make sure xyz_lig has same length with reference atms
                 _bnds_lig = np.array([[ligatms.index(a1),ligatms.index(a2)] for a1,a2 in _bnds_lig],dtype=int)
+                sys.exit()
                 
             continue
         
@@ -253,6 +275,7 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
         bnds_lig.append(_bnds_lig)
         q_lig.append(_q_lig)
         atypes_lig.append(_atypes_lig)
+        repsatm_lig.append(_repsatm_lig)
         
         lddt.append(lddt_per_atm)
         fnat.append(_fnat)
@@ -275,6 +298,7 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
                  atypes_lig=atypes_lig, 
                  charge_lig=q_lig,
                  bnds_lig=bnds_lig,
+                 repsatm_lig=repsatm_lig,
                  lddt=lddt,
                  fnat=fnat,
                  rmsd=rmsd,

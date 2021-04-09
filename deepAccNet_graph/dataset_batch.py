@@ -7,6 +7,11 @@ from torch.utils import data
 from os import listdir
 from os.path import join, isdir, isfile
 from scipy.spatial import distance, distance_matrix
+
+#from torch.utils import data
+from os import listdir
+from os.path import join, isdir, isfile
+from scipy.spatial import distance, distance_matrix
 import scipy
 
 sys.path.insert(0,'./')
@@ -32,7 +37,6 @@ class Dataset(torch.utils.data.Dataset):
                  edgedist        = (8.0,4.5),
                  ballmode        = 'com',
                  distance_feat   = 'std',
-                 normalize_q     = False,
                  debug           = False,
                  nsamples_per_p  = 1,
                  sample_mode     = 'random'
@@ -56,7 +60,6 @@ class Dataset(torch.utils.data.Dataset):
         self.distance_feat = distance_feat
         self.nsamples_per_p = nsamples_per_p
         self.nsamples = max(1,len(self.proteins)*nsamples_per_p)
-        self.normalize_q = normalize_q
         self.sample_mode = sample_mode
 
         if upsample == None:
@@ -71,7 +74,6 @@ class Dataset(torch.utils.data.Dataset):
         return int(self.nsamples)
     
     def __getitem__(self, index):
-        if self.nsamples_per_p == 0: return 0
         # Select a sample decoy
         ip = int(index/self.nsamples_per_p)
         pname = self.proteins[ip]
@@ -87,7 +89,6 @@ class Dataset(torch.utils.data.Dataset):
             return False, False, False, info
         
         sname   = samples['name'][pindex]
-        info['pindex'] = pindex
         info['sname'] = sname
         
         # receptor features that go into se3        
@@ -122,7 +123,7 @@ class Dataset(torch.utils.data.Dataset):
         aas1hot = np.eye(naas)[aas]
 
         r2a = np.concatenate([np.array([0 for _ in xyz_lig]),r2a])
-        r2a1hot = np.eye(max(r2a)+1)[r2a]
+        #r2a1hot = np.eye(max(r2a)+1)[r2a]
         repsatm_idx = np.concatenate([np.array([repsatm_lig]),np.array(repsatm_idx,dtype=int)+len(xyz_lig)])
     
         #affinity = -1.0
@@ -134,12 +135,9 @@ class Dataset(torch.utils.data.Dataset):
         
         # concatenate rec & ligand: ligand comes first
         charges = np.expand_dims(np.concatenate([charges_lig, charges_rec]),axis=1)
-        if self.normalize_q:
-            charges = 1.0/(1.0+np.exp(-2.0*charges))
-            
         xyz = np.concatenate([xyz_lig, xyz_rec])
         atypes = np.concatenate([atypes_lig, atypes_rec])
-        atypes = np.array([find_gentype2num(at) for at in atypes]) # string to integers
+        atypes = np.array([gentype2num[at] for at in atypes]) # string to integers
         atypes = np.eye(max(gentype2num.values())+1)[atypes] # convert integer to 1-hot
         
         sasa = []
@@ -206,7 +204,8 @@ class Dataset(torch.utils.data.Dataset):
         info['fnat']  = torch.tensor(fnat).float()
         info['lddt']  = torch.tensor(lddt).float()
         info['r2amap'] = torch.tensor(r2amap).float()
-        info['r2a']   = torch.tensor(r2a1hot).float()
+        info['r2a']   = torch.tensor(rsds_ord).float()
+        #info['r2a']   = torch.tensor(r2a).float()
         info['repsatm_idx'] = torch.tensor(repsatm_idx).float()
         
         return G_bnd, G_atm, G_res, info
@@ -223,7 +222,7 @@ class Dataset(torch.utils.data.Dataset):
             pindex  = np.random.choice(pindices,p=self.upsample(fnats))
         elif self.sample_mode == 'serial':
             pindex = index%len(pindices)
-        
+            
         return samples, pindex
 
     def make_res_graph(self, xyz, center_xyz, obt_fs, repsatm_idx, rsds_in_Gatm):
@@ -456,14 +455,39 @@ def get_affinity_1hot(affinity,digits,soften=0.5):
     
 def collate(samples):
     graphs_bnd, graphs_atm, graphs_res, info = map(list, zip(*samples))
-    try:
+    nbatch = len(samples)
+    binfo = {'pname':[],'sname':[],'ligidx':[],'fnat':[],'lddt':[]}
+    
+    if True:
         bgraph_bnd = dgl.batch(graphs_bnd)
         bgraph_atm = dgl.batch(graphs_atm)
         bgraph_res = dgl.batch(graphs_res)
-    except:
+
+        #info part
+        batch_nress = bgraph_res.batch_num_nodes()
+        batch_natms = bgraph_atm.batch_num_nodes()
+        
+        r2a = np.array([])
+        for k in range(nbatch):
+            binfo['sname'].append(info[k]['sname'])
+            binfo['pname'].append(info[k]['pname'])
+            binfo['ligidx'].append(info[k]['ligidx'])
+            binfo['fnat'].append(info[k]['fnat'])
+            binfo['lddt'].append(info[k]['lddt'])
+            
+            r2a_k = info[k]['r2a'] #size natm, value resno
+            if k > 0: r2a_k += batch_nress[k]
+            r2a = np.concatenate([r2a,r2a_k])
+            
+        r2a = r2a.astype(int)
+        r2a1hot = np.eye(sum(batch_nress))[r2a]
+        binfo['r2a'] = torch.tensor(r2a1hot).float()
+        binfo['fnat'] = torch.tensor(binfo['fnat']).float()
+        
+    else:
         bgraph_bnd,bgraph_atm,bgraph_res = False,False,False
-    
-    return bgraph_bnd, bgraph_atm, bgraph_res, info
+        
+    return bgraph_bnd, bgraph_atm, bgraph_res, binfo
 
 def distance_feature(mode,d,binsize=0.5,maxd=5.0):
     if mode == '1hot':

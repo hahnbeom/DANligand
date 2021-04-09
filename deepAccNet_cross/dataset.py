@@ -28,7 +28,9 @@ class Dataset(data.Dataset):
                  tag_substr      = [''],
                  upsample        = None,
                  affinity_digits = np.array([2,4,6,8,10,12,14]),
-                 sasa_method     = "sasa"
+                 sasa_method     = "sasa",
+                 stack           = False,
+                 nsamples_per_p  = 1
     ):
         
         self.dist_fn = dist_fn 
@@ -39,6 +41,9 @@ class Dataset(data.Dataset):
         self.randomize = randomize
         self.tag_substr = tag_substr
         self.sasa_method = sasa_method
+        self.stack = {}
+        self.do_stack = stack
+        self.nsamples = max(1,len(self.proteins)*nsamples_per_p)
         
         if upsample == None:
             self.upsample = sample_uniform
@@ -49,14 +54,13 @@ class Dataset(data.Dataset):
 
     def __len__(self):
         'Denotes the total number of samples'
-        return len(self.proteins)
+        return int(self.nsamples)
     
     def __getitem__(self, index):
         'Generates one sample of data'
-        
         # Select a sample decoy 
-        pname = self.proteins[index]
-        
+        pname = self.proteins[index%len(self.proteins)]
+
         info = {}
         info['stat'] = True
         info['pname'] = pname
@@ -76,141 +80,157 @@ class Dataset(data.Dataset):
             return False, 0.0, 0.0, info
         
         fnats   = np.array([samples['fnat'][i] for i in pindices])
-        pindex  = np.random.choice(pindices,p=self.upsample(fnats))
 
-        sname   = samples['name'][pindex]
-        info['sname'] = sname
-        
-        # receptor features that go into se3
+        if self.do_stack:
+            if pname not in self.stack: self.stack[pname] = 0
+            self.stack[pname] += 1
+            pindex = self.stack[pname]
+            if pindex >= len(samples['name']):
+                return False, 0.0, 0.0, info
+        else:
+            pindex  = np.random.choice(pindices,p=self.upsample(fnats))
+
+        info['pname'] = pname
         prop = np.load(self.datadir+pname+".prop.npz")
-        charges_rec = prop['charge_rec'] 
-        atypes_rec  = prop['atypes_rec'] #1-hot
-        aas         = prop['aas'] #rec only
-        sasa_rec,cbcounts_rec = 0,0
-        if 'sasa_rec' in prop: sasa_rec = prop['sasa_rec']
-        if 'cbcounts_rec' in prop: cbcounts_rec = prop['cbcounts_rec']
-        # unused here
-        #repsatm_idx = prop['repsatm_idx'] #representative atm idx for each residue (e.g. CA); receptor only
-        #r2a         = np.array(prop['residue_idx'],dtype=int) + 1 #add ligand as the first residue
-        
-        # get per-lig features
-        xyz_lig = samples['xyz'][pindex]
-        xyz_rec = samples['xyz_rec'][pindex]
-        lddt    = samples['lddt'][pindex] # natm
-        fnat    = samples['fnat'][pindex] # 1
-
-        atypes_lig  = samples['atypes_lig'][pindex]
-        bnds_lig    = samples['bnds_lig'][pindex]
-        charges_lig = samples['charge_lig'][pindex]
-
-        #affinity = -1.0
-        #if 'affinity' in samples:    affinity    = samples['affinity'][pindex]
-        #affinity1hot = get_affinity_1hot(affinity, self.affinity_digits)
-
-        # shift rec-only properties by nligatms
-        naas = len(residues_and_metals) + 1 #add "ligand type"
-        aas = [naas-1 for _ in xyz_lig] + list(aas)
-        aas = np.eye(naas)[aas]
-        bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
-        
-        # concatenate rec & ligand: ligand comes first
-        charges = np.expand_dims(np.concatenate([charges_lig, charges_rec]),axis=1)
-        xyz = np.concatenate([xyz_lig, xyz_rec])
-        atypes = np.concatenate([atypes_lig, atypes_rec])
-        atypes = np.array([gentype2num[at] for at in atypes]) # string to integers
-        atypes = np.eye(max(gentype2num.values())+1)[atypes] # convert integer to 1-hot
-        sasa = []
-        sasa_lig = np.array([0.5 for _ in xyz_lig]) #neutral value
-
-        if self.sasa_method == 'cbcounts':
-            sasa = np.concatenate([sasa_lig,cbcounts_rec])
-            sasa = np.expand_dims(sasa,axis=1)
-        elif self.sasa_method == 'sasa':
-            sasa = np.concatenate([sasa_lig,sasa_rec])
-            sasa = np.expand_dims(sasa,axis=1)
-        
-        # Do KD-ball neighbour search.
-        # We are also saving node features.
-        # I think there is more efficient way to do this, but for now we are settling with this.
-        # Grabbing a <dist neighbor from ligcom
-        
+    
         try:
-            center_xyz = np.mean(xyz_lig, axis=0)[None,:] #2-D required...
-            dist    = self.ball_radius
-            kd      = scipy.spatial.cKDTree(xyz)
-            kd_ca   = scipy.spatial.cKDTree(center_xyz)
-            indices = kd_ca.query_ball_tree(kd, dist)
-
-            # make sure ligand atms are ALL INCLUDED
-            idx_ord = [i for i in indices[0] if i < len(xyz_lig)]
-            idx_ord += [i for i in indices[0] if i >= len(xyz_lig)]
-         
-            # Get only the node features that we need.
-            atype_f = atypes[idx_ord]
-            aas_f   = aas[idx_ord]
-            charges_f = charges[idx_ord]
-            sasa_f = []
-            if len(sasa) > 0: sasa_f  = sasa[idx_ord]
-            xyz     = xyz[idx_ord]
-            bnds    = np.concatenate([bnds_lig,bnds_rec])
-            bnds    = [bnd for bnd in bnds if (bnd[0] in idx_ord) and (bnd[1] in idx_ord)]
-
-            ligidx = np.zeros((len(idx_ord),len(xyz_lig)))
-            for i in range(len(xyz_lig)): ligidx[i,i] = 1.0
-            info['ligidx'] = torch.tensor(ligidx).float()
-        
-            # Concatenate coord & centralize xyz to ca.
-            xyz = xyz - center_xyz
-            xyz = torch.tensor(xyz).float()
-
-            # randomize coordinate
-            if self.randomize > 1e-3:
-                randxyz = 2.0*self.randomize*(0.5 - torch.rand((len(xyz),3)))
-                xyz = xyz + randxyz
-        
-            # Edge index and neighbour funtions.
-            D_neighbors, E_idx = self.dist_fn(xyz[None,])
-        
-            # Construct the graph
-            u = torch.tensor(np.arange(E_idx.shape[1]))[:,None].repeat(1, E_idx.shape[2]).reshape(-1)
-            #print(atype_f.shape, aas_f.shape, charges_f.shape, xyz.shape, E_idx.shape)
-
-            obt = [atype_f, aas_f, charges_f]
-            if len(sasa_f) > 0: obt.append(sasa_f)
-            obt = np.concatenate(obt,axis=-1)
-            
-            v = E_idx[0,].reshape(-1)
-            G = dgl.graph((u,v))
-        
-            # Save x 
-            G.ndata['x'] = xyz[:,None,:]
-            G.ndata['0'] = torch.tensor(obt).float()
-        
-            # Add edge features to graph
-            # u,v are nedges & pairs to each other; i.e. (u[i],v[i]) are edges for every i
-            bnds_bin = np.zeros((len(xyz),len(xyz)))
-            for i,j in bnds:
-                k = idx_ord.index(i)
-                l = idx_ord.index(j)
-                bnds_bin[k,l] = bnds_bin[l,k] = 1
-
-            w = torch.sqrt(torch.sum((xyz[v] - xyz[u])**2, axis=-1)+1e-6)[...,None].repeat(1,2)
-            w[:,1] = torch.tensor(bnds_bin[v,u]).float()
-
-            G.edata['d'] = xyz[v] - xyz[u]
-            G.edata['w'] = w
+            G, lddt, fnat = graph_from_npz(prop,samples,pindex,info,
+                                           self.sasa_method,
+                                           self.ball_radius,
+                                           self.dist_fn,
+                                           self.randomize)
+            info['stat'] = True
             
         except:
-            stat = False
+            lddt = fnat = 0
+            G = False
+            info['stat'] = False
+    
+        return G, lddt, fnat, info
 
-        info['stat'] = stat
-        info['pname'] = pname
-        #info['affinity'] = affinity1hot
-
-        if not stat:
-            return False, 0.0, 0.0, info
+# prop = np.load(.prop.npz)
+# samples = np.load(.lig.npz)
+def graph_from_npz(prop,samples,pindex,info,
+                   sasa_method,ball_radius,dist_fn,randomize):
+    sname   = samples['name'][pindex]
+    info['sname'] = sname
+    info['pindex'] = pindex
         
-        return G, lddt, fnat, info 
+    # receptor features that go into se3
+    charges_rec = prop['charge_rec'] 
+    atypes_rec  = prop['atypes_rec'] #1-hot
+    aas         = prop['aas'] #rec only
+    sasa_rec,cbcounts_rec = 0,0
+    if 'sasa_rec' in prop: sasa_rec = prop['sasa_rec']
+    if 'cbcounts_rec' in prop: cbcounts_rec = prop['cbcounts_rec']
+        
+    # get per-lig features
+    xyz_lig = samples['xyz'][pindex]
+    xyz_rec = samples['xyz_rec'][pindex]
+    lddt    = samples['lddt'][pindex] # natm
+    fnat    = samples['fnat'][pindex] # 1
+
+    atypes_lig  = samples['atypes_lig'][pindex]
+    bnds_lig    = samples['bnds_lig'][pindex]
+    charges_lig = samples['charge_lig'][pindex]
+
+    #affinity = -1.0
+    #if 'affinity' in samples:    affinity    = samples['affinity'][pindex]
+    #affinity1hot = get_affinity_1hot(affinity, self.affinity_digits)
+
+    # shift rec-only properties by nligatms
+    naas = len(residues_and_metals) + 1 #add "ligand type"
+    aas = [naas-1 for _ in xyz_lig] + list(aas)
+    aas = np.eye(naas)[aas]
+    bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
+        
+    # concatenate rec & ligand: ligand comes first
+    charges = np.expand_dims(np.concatenate([charges_lig, charges_rec]),axis=1)
+    xyz = np.concatenate([xyz_lig, xyz_rec])
+    atypes = np.concatenate([atypes_lig, atypes_rec])
+    atypes = np.array([gentype2num[at] for at in atypes]) # string to integers
+    atypes = np.eye(max(gentype2num.values())+1)[atypes] # convert integer to 1-hot
+    sasa = []
+    sasa_lig = np.array([0.5 for _ in xyz_lig]) #neutral value
+
+    if sasa_method == 'cbcounts':
+        sasa = np.concatenate([sasa_lig,cbcounts_rec])
+        sasa = np.expand_dims(sasa,axis=1)
+    elif sasa_method == 'sasa':
+        sasa = np.concatenate([sasa_lig,sasa_rec])
+        sasa = np.expand_dims(sasa,axis=1)
+        
+    # Do KD-ball neighbour search.
+    # We are also saving node features.
+    # I think there is more efficient way to do this, but for now we are settling with this.
+    # Grabbing a <dist neighbor from ligcom
+        
+    center_xyz = np.mean(xyz_lig, axis=0)[None,:] #2-D required...
+    dist    = ball_radius
+    kd      = scipy.spatial.cKDTree(xyz)
+    kd_ca   = scipy.spatial.cKDTree(center_xyz)
+    indices = kd_ca.query_ball_tree(kd, dist)
+
+    # make sure ligand atms are ALL INCLUDED
+    idx_ord = [i for i in indices[0] if i < len(xyz_lig)]
+    idx_ord += [i for i in indices[0] if i >= len(xyz_lig)]
+         
+    # Get only the node features that we need.
+    atype_f = atypes[idx_ord]
+    aas_f   = aas[idx_ord]
+    charges_f = charges[idx_ord]
+    sasa_f = []
+    if len(sasa) > 0: sasa_f  = sasa[idx_ord]
+    xyz     = xyz[idx_ord]
+    bnds    = np.concatenate([bnds_lig,bnds_rec])
+    bnds    = [bnd for bnd in bnds if (bnd[0] in idx_ord) and (bnd[1] in idx_ord)]
+
+    ligidx = np.zeros((len(idx_ord),len(xyz_lig)))
+    for i in range(len(xyz_lig)): ligidx[i,i] = 1.0
+    info['ligidx'] = torch.tensor(ligidx).float()
+        
+    # Concatenate coord & centralize xyz to ca.
+    xyz = xyz - center_xyz
+    xyz = torch.tensor(xyz).float()
+
+    # randomize coordinate
+    if randomize > 1e-3:
+        randxyz = 2.0*randomize*(0.5 - torch.rand((len(xyz),3)))
+        xyz = xyz + randxyz
+        
+    # Edge index and neighbour funtions.
+    D_neighbors, E_idx = dist_fn(xyz[None,])
+        
+    # Construct the graph
+    u = torch.tensor(np.arange(E_idx.shape[1]))[:,None].repeat(1, E_idx.shape[2]).reshape(-1)
+    #print(atype_f.shape, aas_f.shape, charges_f.shape, xyz.shape, E_idx.shape)
+
+    obt = [atype_f, aas_f, charges_f]
+    if len(sasa_f) > 0: obt.append(sasa_f)
+    obt = np.concatenate(obt,axis=-1)
+            
+    v = E_idx[0,].reshape(-1)
+    G = dgl.graph((u,v))
+        
+    # Save x 
+    G.ndata['x'] = xyz[:,None,:]
+    G.ndata['0'] = torch.tensor(obt).float()
+        
+    # Add edge features to graph
+    # u,v are nedges & pairs to each other; i.e. (u[i],v[i]) are edges for every i
+    bnds_bin = np.zeros((len(xyz),len(xyz)))
+    for i,j in bnds:
+        k = idx_ord.index(i)
+        l = idx_ord.index(j)
+        bnds_bin[k,l] = bnds_bin[l,k] = 1
+
+    w = torch.sqrt(torch.sum((xyz[v] - xyz[u])**2, axis=-1)+1e-6)[...,None].repeat(1,2)
+    w[:,1] = torch.tensor(bnds_bin[v,u]).float()
+        
+    G.edata['d'] = xyz[v] - xyz[u]
+    G.edata['w'] = w
+
+    return G, lddt, fnat
     
 # Given a list of coordinates X, gets top-k neighbours based on eucledian distance
 def get_dist_neighbors(X, top_k=16, eps=1E-6):

@@ -2,13 +2,13 @@ import os,sys
 import numpy as np
 import random
 
-K = 5
+K = 6
 
 symm = [l[:-1] for l in open('trgs.symm')]
 
-ftrn = 0.8
+ftrn = 0.9
 fval = 0.1
-ftst = 0.1
+ftst = 0.0001
 tags = []
 tags_symm = []
 for l in open(sys.argv[1]):
