@@ -15,6 +15,7 @@ plot/
 analysis/
 old/
 save/
+models/*
 VStest/
 MEMO
 GITHUB_TOKEN
