@@ -4,6 +4,7 @@ import os
 
 import numpy as np
 import torch
+import time
 
 import matplotlib.pyplot as plt
 sys.path.insert(0, ".")
@@ -90,21 +91,23 @@ model = SE3Transformer(
 
 model.to(device)
 
-checkpoint = torch.load(join("models", modelname, "best.pkl"))
+checkpoint = torch.load(join("models", modelname, "best.pkl"), map_location=device)
 model.load_state_dict(checkpoint["model_state_dict"])
 
-#trgs = [l[:-1] for l in open(sys.argv[1])]
-trgs = np.load('data/valid_proteins5.npy')
+trgs = [l[:-1] for l in open(sys.argv[1])]
+#trgs = np.load('data/valid_proteins5.npy')
 
 with torch.no_grad(): # without tracking gradients
     # Loop over validation 10 times to get stable evaluation
     temp_loss = {"total":[], "global":[], "local":[]}
 
+    t0 = time.time()
     val_set = Dataset(trgs,
                       #root_dir="/net/scratch/hpark/CMdock/features/",
-                      root_dir="/projects/ml/ligands/v4.reps/",
+                      #root_dir="/projects/ml/ligands/v4.reps/",
+                      root_dir="/home/hpark/DANlig/src/test/",
                       ball_radius=BALLDIST,
-                      tag_substr=['rigid','flex'], #['CM'],
+                      tag_substr=[''], #['CM'],
                       sasa_method='sasa', bndgraph_type=BNDGRAPH_TYPE,
                       edgemode=EDGEMODE, edgek=EDGEK, edgedist=EDGEDIST,
                       ballmode=BALLMODE,
@@ -117,6 +120,7 @@ with torch.no_grad(): # without tracking gradients
                                       **params_loader)
     pnames = []
     snames = {}
+    n = 0
     for i, (G_bnd, G_atm, G_res, info) in enumerate(valid_generator):
         if not G_bnd:
             print("skip %s %s"%(info[0]['pname'],info[0]['sname']))
@@ -144,4 +148,6 @@ with torch.no_grad(): # without tracking gradients
         print("%4s %4d %15s %6.3f %6.3f %6.3f %3d"%(pname,pnames.index(pname),sname,
                                                     float(fnat),float(pred_fnat),
                                                     abs(float(fnat)-float(pred_fnat)),pindex))
- 
+        n += 1
+    t1 = time.time()
+    print("Processed %d samples, total elapsed time: %.1f secs"%(n,t1-t0))

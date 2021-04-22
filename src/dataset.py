@@ -2,7 +2,7 @@ import sys
 import numpy as np
 import torch
 import dgl
-from .utils import *
+from .myutils import *
 from torch.utils import data
 from os import listdir
 from os.path import join, isdir, isfile
@@ -18,23 +18,23 @@ class Dataset(torch.utils.data.Dataset):
                  root_dir        = "/projects/ml/ligands/v4/",
                  verbose         = False,
                  useTipNode      = False,
-                 ball_radius     = 10,
+                 ball_radius     = 9.0,
                  displacement    = "",
                  randomize       = 0.0,
                  tag_substr      = [''],
                  upsample        = None,
                  num_channels    = 32,
                  affinity_digits = np.array([2,4,6,8,10,12,14]),
-                 sasa_method     = "none",
+                 sasa_method     = "sasa",
                  bndgraph_type   = 'bonded',
-                 edgemode        = 'topk',
-                 edgek           = (12,12),
+                 edgemode        = 'dist',
+                 edgek           = (0,0),
                  edgedist        = (8.0,4.5),
-                 ballmode        = 'com',
+                 ballmode        = 'all',
                  distance_feat   = 'std',
                  normalize_q     = False,
                  debug           = False,
-                 nsamples_per_p  = 1,
+                 nsamples_per_p  = 20,
                  sample_mode     = 'random'
     ):
         
@@ -73,34 +73,45 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         if self.nsamples_per_p == 0: return 0
         # Select a sample decoy
-        ip = int(index/self.nsamples_per_p)
-        pname = self.proteins[ip]
+        #ip = int(index/self.nsamples_per_p)
+        pname = self.proteins[0]
         
         info = {}
         info['pname'] = pname
         info['sname'] = 'none'
 
         try:
-            samples, pindex = self.get_a_sample(pname, index)
+            samples = np.load(self.datadir+pname+".features.npz",allow_pickle=True)
         except:
-            print("BAD npz!", self.datadir+pname+".lignpz")
+            print("BAD npz!", self.datadir+pname+".features.npz")
             return False, False, False, info
+        pindex = index%len(samples['name'])
         
         sname   = samples['name'][pindex]
         info['pindex'] = pindex
         info['sname'] = sname
         
-        # receptor features that go into se3        
+        # receptor features that go into se3
+        '''
         prop = np.load(self.datadir+pname+".prop.npz")
         charges_rec = prop['charge_rec'] 
         atypes_rec  = prop['atypes_rec'] #1-hot
         aas         = prop['aas'] #rec only
         repsatm_idx = prop['repsatm_idx'] #representative atm idx for each residue (e.g. CA); receptor only
         r2a         = np.array(prop['residue_idx'],dtype=int) + 1 #add ligand as the first residue
-
         sasa_rec,cbcounts_rec = 0,0
         if 'sasa_rec' in prop: sasa_rec = prop['sasa_rec']
         if 'cbcounts_rec' in prop: cbcounts_rec = prop['cbcounts_rec']
+        # bond properties
+        bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
+        '''
+        charges_rec = samples['charge_rec'][pindex]
+        atypes_rec  = samples['atypes_rec'][pindex] #1-hot
+        aas         = samples['aas'][pindex] #rec only
+        repsatm_idx = samples['repsatm_idx'][pindex] #representative atm idx for each residue (e.g. CA); receptor only
+        r2a         = np.array(samples['residue_idx'][pindex],dtype=int) + 1 #add ligand as the first residue
+        sasa_rec    = samples['sasa_rec'][pindex]
+        bnds_rec    = samples['bnds_rec'][pindex]
         
         # get per-lig features
         xyz_lig = samples['xyz'][pindex]
@@ -121,6 +132,8 @@ class Dataset(torch.utils.data.Dataset):
         aas = [naas-1 for _ in xyz_lig] + list(aas)
         aas1hot = np.eye(naas)[aas]
 
+        bnds_rec    = bnds_rec + len(xyz_lig) #shift index
+        
         r2a = np.concatenate([np.array([0 for _ in xyz_lig]),r2a])
         r2a1hot = np.eye(max(r2a)+1)[r2a]
         repsatm_idx = np.concatenate([np.array([repsatm_lig]),np.array(repsatm_idx,dtype=int)+len(xyz_lig)])
@@ -129,9 +142,6 @@ class Dataset(torch.utils.data.Dataset):
         #if 'affinity' in samples:    affinity    = samples['affinity'][pindex]
         #affinity1hot = get_affinity_1hot(affinity, self.affinity_digits)
 
-        # bond properties
-        bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
-        
         # concatenate rec & ligand: ligand comes first
         charges = np.expand_dims(np.concatenate([charges_lig, charges_rec]),axis=1)
         if self.normalize_q:
@@ -214,7 +224,8 @@ class Dataset(torch.utils.data.Dataset):
     def get_a_sample(self,pname,index):
         pindices = []
         
-        samples = np.load(self.datadir+pname+".lig.npz",allow_pickle=True)
+        #samples = np.load(self.datadir+pname+".lig.npz",allow_pickle=True)
+        samples = np.load(self.datadir+pname+".features.npz",allow_pickle=True)
         for substr in self.tag_substr:
             pindices += [i for i,n in enumerate(samples['name']) if substr in n]
         fnats = np.array([samples['fnat'][i] for i in pindices])
