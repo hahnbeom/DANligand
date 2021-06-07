@@ -14,7 +14,7 @@ sys.path.insert(0,'./')
 class Dataset(torch.utils.data.Dataset):
     'Characterizes a dataset for PyTorch'
     def __init__(self,
-                 targets,
+                 featuref,
                  root_dir        = "/projects/ml/ligands/v4/",
                  verbose         = False,
                  useTipNode      = False,
@@ -34,13 +34,11 @@ class Dataset(torch.utils.data.Dataset):
                  distance_feat   = 'std',
                  normalize_q     = False,
                  debug           = False,
-                 nsamples_per_p  = 20,
-                 sample_mode     = 'random'
+                 sample_mode     = 'serial'
     ):
         
-        self.proteins = targets
-        
         self.datadir = root_dir
+        self.featuref = featuref
         self.verbose = verbose
         self.ball_radius = ball_radius
         self.randomize = randomize
@@ -54,8 +52,10 @@ class Dataset(torch.utils.data.Dataset):
         self.dist_fn_atm = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[1], dcut=edgedist[1])
         self.debug = debug
         self.distance_feat = distance_feat
-        self.nsamples_per_p = nsamples_per_p
-        self.nsamples = max(1,len(self.proteins)*nsamples_per_p)
+        
+        if sample_mode == 'serial':
+            self.nsamples = len(np.load(self.datadir+featuref)['name'])
+            
         self.normalize_q = normalize_q
         self.sample_mode = sample_mode
 
@@ -71,19 +71,18 @@ class Dataset(torch.utils.data.Dataset):
         return int(self.nsamples)
     
     def __getitem__(self, index):
-        if self.nsamples_per_p == 0: return 0
         # Select a sample decoy
         #ip = int(index/self.nsamples_per_p)
-        pname = self.proteins[0]
+        pname = self.featuref
         
         info = {}
         info['pname'] = pname
         info['sname'] = 'none'
 
         try:
-            samples = np.load(self.datadir+pname+".features.npz",allow_pickle=True)
+            samples = np.load(self.datadir+self.featuref,allow_pickle=True)
         except:
-            print("BAD npz!", self.datadir+pname+".features.npz")
+            print("BAD npz!", self.datadir+self.featuref)
             return False, False, False, info
         pindex = index%len(samples['name'])
         

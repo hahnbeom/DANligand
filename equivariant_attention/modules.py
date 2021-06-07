@@ -13,6 +13,7 @@ from equivariant_attention.from_se3cnn import utils_steerable
 from equivariant_attention import fibers
 from equivariant_attention.fibers import Fiber, get_fiber_dict, fiber2tensor, fiber2head
 
+import dgl
 import dgl.function as fn # for graphs
 from dgl.nn.pytorch.softmax import edge_softmax
 from dgl.nn.pytorch.glob import AvgPooling, MaxPooling
@@ -511,8 +512,10 @@ class GMABSE3(nn.Module):
             #print("attn:",attn.shape)
             #a = attn.unsqueeze(-1)
             #print(a.shape)
-            #msg = attn.unsqueeze(-1).unsqueeze(-1) * value
-            msg = attn.unsqueeze(-1) * value
+            if dgl.__version__ < '0.5': #version <0.5
+                msg = attn.unsqueeze(-1).unsqueeze(-1) * value
+            else: # >=0.5
+                msg = attn.unsqueeze(-1) * value
 
             return {'m': msg}
         return fnc

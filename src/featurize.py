@@ -166,7 +166,8 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
          store_npz=True,
          same_answer=True,
          extrapath='',
-         debug=False):
+         debug=False,
+         nper_npz=100):
 
     #inputpath = './'
     #outpath = './features'
@@ -283,28 +284,36 @@ def main(tag,verbose=False,decoytypes=['rigid','flex'],
 
     # store all decoy info into a single file
     if store_npz:
-        np.savez("%s/%s.features.npz"%(outpath,tag),
-                 #from prop
-                 aas=aas_rec,
-                 atypes_rec=atypes_rec, #string
-                 charge_rec=charge_rec,
-                 bnds_rec=bnds_rec,
-                 sasa_rec=sasa_rec, #apo
-                 residue_idx=residue_idx,
-                 repsatm_idx=repsatm_idx,
-
-                 #originaly at lig
-                 xyz=xyz_lig,
-                 xyz_rec=xyz_rec,
-                 atypes_lig=atypes_lig, 
-                 charge_lig=q_lig,
-                 bnds_lig=bnds_lig,
-                 repsatm_lig=repsatm_lig,
-                 lddt=lddt,
-                 fnat=fnat,
-                 rmsd=rmsd,
-                 chainres=chainres,
-                 name=tags)
+        n = int(len(aas_rec)/nper_npz)+1
+        npzs = []
+        for i in range(n):
+            b = i*nper_npz
+            e = min(len(aas_rec)-1,(i+1)*nper_npz)
+            npz = "%s/%s%d.features.npz"%(outpath,tag,i)
+            npzs.append(npz)
+            np.savez(npz,
+                     #from prop
+                     aas=aas_rec[b:e],
+                     atypes_rec=atypes_rec[b:e], #string
+                     charge_rec=charge_rec[b:e],
+                     bnds_rec=bnds_rec[b:e],
+                     sasa_rec=sasa_rec[b:e], #apo
+                     residue_idx=residue_idx[b:e],
+                     repsatm_idx=repsatm_idx[b:e],
+                     
+                     #originaly at lig
+                     xyz=xyz_lig[b:e],
+                     xyz_rec=xyz_rec[b:e],
+                     atypes_lig=atypes_lig[b:e], 
+                     charge_lig=q_lig[b:e],
+                     bnds_lig=bnds_lig[b:e],
+                     repsatm_lig=repsatm_lig[b:e],
+                     lddt=lddt[b:e],
+                     fnat=fnat[b:e],
+                     rmsd=rmsd[b:e],
+                     chainres=chainres[b:e],
+                     name=tags[b:e])
+    return npzs
 
 if __name__ == "__main__":
     #trainlist = [l[:-1] for l in open(sys.argv[1])]
