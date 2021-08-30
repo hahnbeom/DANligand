@@ -88,48 +88,6 @@ gentype2simple = {'CS':0,'CS1':0,'CS3':0,'CST':0,'CSQ':0,'CSp':0,
                   'Ca2p':16, 'Mg2p':17, 'Mn':18, 'Fe2p':19, 'Fe3p':19, 'Zn2p':20, 'Co2p':21, 'Cu2p':22, 'Cd':23
                   }
 
-# just for book-keeping
-# order as charged -> A&D -> RingD -> RingA -> rest
-MOTIFS = ['None', #0
-          'COO','Arg','Amine', # 1~3
-          'OH','bb','Amide1', # 4~6
-          'Nhis','Ntrp', #7~8
-          'Phe', 'SH', #9 #10
-          'CH3', 'CH32', 'SCH3' #11~13
-          ]
-SIMPLEMOTIFIDX = [0,
-                  2,4,3,
-                  3,3,3,
-                  2,4,
-                  6,6,6,6,6] #0:none 2:acceptor 3:both 4:donor 6:non-Hbonder
-
-# per-aa
-BBMOTIF = (5,'C','O','CA')
-#BBMOTIF = None
-
-POSSIBLE_MOTIFS = \
-    {'ALA':[(11,'CA','CB','N'),BBMOTIF],
-     #'CYS':[(10,'SG1','HG','CB'),BBMOTIF], #protonation state?
-     'ASP':[(1,'CG','OD1','CB'),BBMOTIF],
-     'GLU':[(1,'CD','OE1','CG'),BBMOTIF],
-     'PHE':[(9,'CG','CD1','CE1'),BBMOTIF],
-     'HIS':[(7,'ND1','HD1','CG'),(7,'NE2','HE2','CD2'), #donor
-            (8,'ND1','CE1','CG'),(8,'NE2','CE1','CD2'), #acceptor
-            BBMOTIF], #
-     'ILE':[(11,'CG1','CD1','CB'),(11,'CB','CG2','CA'),BBMOTIF],
-     'LYS':[(3,'NZ','1HZ','CE'),BBMOTIF],
-     'LEU':[(12,'CG','CD1','CD2'),BBMOTIF],
-     'MET':[(13,'SD','CE','CG'),BBMOTIF],
-     'ASN':[(6,'CG','OD1','CB'),BBMOTIF],
-     'GLN':[(6,'CD','OE1','CG'),BBMOTIF],
-     'ARG':[(2,'2HH1','NH1','CZ'),BBMOTIF],
-     'SER':[(4,'OG','HG','CB'),BBMOTIF],
-     'THR':[(4,'OG1','HG1','CB'),BBMOTIF],
-     'VAL':[(12,'CB','CG1','CG2'),BBMOTIF],
-     'TRP':[(9,'CD2','CE2','CZ2'),(4,'CD1','NE1','HE1'),BBMOTIF],
-     'TYR':[(9,'CG','CD1','CE1'),(4,'OH','HH','CZ'),BBMOTIF],
-    }
-
 def findAAindex(aa):
     if aa in ALL_AAS:
         return ALL_AAS.index(aa)

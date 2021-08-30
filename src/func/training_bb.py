@@ -18,31 +18,35 @@ device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
 
 HYPERPARAMS = {
     "modelname" : sys.argv[1], #"XGrepro2",
-    "transfer"   : False, #transfer learning starting from "start.pkl"
-    "base_learning_rate" : float(sys.argv[3]), #still too big?
-    "gradient_accum_step" : 10,
+    "base_learning_rate" : 1.0e-3, #dflt 1e-3
+    'num_layers': (1,2,2),
+    "w_reg"     : 1.0e-6, # loss ~0.05~0.1
     "max_epochs": 100,
     "w_lossBin"   : 1.0, #motif or not
     "w_lossCat"   : 1.0, #which category 
-    "w_lossxyz"   : 0.0, #MSE
+    "w_lossxyz"   : 1.0, #MSE
     "w_lossrot"   : 0.0, #MSE
-    "w_reg"     : 1.0e-6, # loss ~0.05~0.1
+
+    # misc options below
     "modeltype" : 'comm',
-    'num_layers': (1,2,2),
+    "gradient_accum_step" : 10,
     'nchannels' : 32, #default 32
     'use_l1'    : 1,
-    'nalt_train': 1,
-    'setsuffix' : 'v5nofake',
-    'ansidx'   : [int(word) for word in sys.argv[2].split(',')], #-1 for all-type category prediction
-    #'hfinal_from': (1,1), #skip-connection, ligres
+    'setsuffix' : 'v5or',
+    'ansidx'   : list(range(0,14)), #[int(word) for word in sys.argv[2].split(',')], #-1 for all-type category prediction
+    'learn_OR'  : True,
+    "transfer"  : False, #transfer learning starting from "start.pkl"
     'clip_grad' : -1.0, #set < 0 if don't want
-    #'hfinal_from': (int(sys.argv[2]),int(sys.argv[3])), #skip-connection, ligres
-    # only for VS
 }
 
 # default setup
 set_params = {
-    'root_dir'     : "/projects/ml/ligands/motif/exclchain/", #let each set get their own...
+    # IMPORTANT OPTIONS:
+    "randomize_lig": 1.0, # Ang, pert the motif coord!
+    'root_dir'     : "/projects/ml/ligands/motif/backbone/", #let each set get their own...
+    'xyz_as_bb'    : True, #request to predict backbone not the motif
+    
+    # default below
     'ball_radius'  : 12.0,
     'ballmode'     : 'all',
     'sasa_method'  : 'sasa',
@@ -51,15 +55,13 @@ set_params = {
     'edgedist'     : (10.0,6.0), 
     'distance_feat': 'std',
     "randomize"    : 0.2, # Ang, pert the rest
-    "randomize_lig": 1.0, # Ang, pert the motif coord!
-    "CBonly"       : ('-CB' in sys.argv),
-    #'aa_as_het'   : True,
+    "CBonly"       : False,
     'debug'        : ('-debug' in sys.argv),
     }
 
 # # Instantiating a dataloader
 generator_params = {
-    'shuffle': False, #True,
+    'shuffle': True, #True,
     'num_workers': 4,
     'pin_memory': True,
     'collate_fn': collate,
@@ -85,6 +87,7 @@ def load_model(silent=False):
         modeltype      = HYPERPARAMS['modeltype'],
         nntypes        = ('SE3T','SE3T','SE3T'),
         outtype        = outtype,
+        learn_orientation = HYPERPARAMS['learn_OR']
     )
     
     model.to(device)
@@ -180,20 +183,25 @@ def enumerate_an_epoch(model, optimizer, generator,
         #try:
         if w_loss[2] > 0 or w_loss[3] > 0:
             LossMSE = torch.nn.MSELoss()
+            
             dxyz = info['dxyz'].to(device)
             rot  = info['rot'].to(device) #should be symmetry aware; shape=[n,4] where n={1,2,3}
             dxyz_pred = dxyz_pred.to(device)
+            
             loss3 = torch.tensor(0.0)
             loss4 = torch.tensor(0.0)
             if int(motifidx) > 0:
-                loss3 = LossMSE(dxyz_pred,dxyz)
-                loss4 = motif.LossRot(rot,rot_pred) # custom loss
+                loss3 = LossMSE(dxyz_pred[motifidx],dxyz)
+                loss4 = motif.LossRot(rot,rot_pred[motifidx]) # custom loss
+            #else ignore
+                # measure magnitude
+            #l += " %6.2f %6.2f"%(torch.sum(dxyz_pred*dxyz_pred).float(), torch.sum(rot_pred[motifidx]*rot_pred[motifidx]).float())
 
         loss = w_loss[0]*loss1 + w_loss[1]*loss2 + w_loss[2]*loss3 + w_loss[3]*loss4
         
-        l += " | %6.3f (%6.3f %6.3f)"%(float(loss),float(loss1),float(loss2))
-        print(l)
-        
+        l += " | %6.3f (%6.3f %6.3f"%(float(loss),float(loss1),float(loss2))
+        l += " %6.3f %6.3f)\n"%(float(loss3),float(loss4))
+
         ##label, topredict
         #            float(P[0,1]),
         #            float(loss), float(loss1), float(loss2)))
@@ -224,7 +232,7 @@ def enumerate_an_epoch(model, optimizer, generator,
         temp_loss["total"].append(loss.cpu().detach().numpy()) # append only
 
         if header != "":
-            sys.stdout.write("\r%s, Batch: [%2d/%2d], loss: %8.4f"%(header,b_count,len(generator),temp_loss["total"][-1]))
+            sys.stdout.write("\r%s, Batch: [%2d/%2d], loss: %8.4f %s"%(header,b_count,len(generator),temp_loss["total"][-1],l))
     return temp_loss
             
 def main():

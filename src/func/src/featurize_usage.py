@@ -121,7 +121,8 @@ def featurize_target_properties(pdb,npz,out,extrapath="",verbose=False):
 
 def grid_from_xyz(xyzs,xyz_lig,gridsize,
                   clash=2.0,contact=4.0,
-                  option='ligandxyz'):
+                  option='ligandxyz',
+                  gridout=sys.stdout):
 
     reso = gridsize*0.7
     bmin = [min(xyz_lig[:,k]) for k in range(3)]
@@ -155,8 +156,10 @@ def grid_from_xyz(xyzs,xyz_lig,gridsize,
     excl = list(np.unique(excl))
     grids = np.array([grid for i,grid in enumerate(grids) if (i in incl and i not in excl)])
     #grids = np.array([grid for i,grid in enumerate(grids) if (i not in excl)])
-    for i,grid in enumerate(grids):
-        print("HETATM %4d  CA  CA  X   1    %8.3f%8.3f%8.3f"%(i,grid[0],grid[1],grid[2]))
+
+    if gridout != None:
+        for i,grid in enumerate(grids):
+            gridout.write("HETATM %4d  CA  CA  X   1    %8.3f%8.3f%8.3f\n"%(i,grid[0],grid[1],grid[2]))
     
     print("Search through %d grid points, of %d contact grids %d clash -> %d"%(nfull,len(incl),len(excl),len(grids)))
 
@@ -183,6 +186,7 @@ def main(pdb,outprefix,
          ligchain=None,
          out=sys.stdout,
          gridoption='ligand',
+         maskres=[],
          skip_if_exist=True):
 
     # read relevant motif
@@ -198,13 +202,15 @@ def main(pdb,outprefix,
             sys.exit("Unknown ligname or ligchain: ", ligname, ligchain)
         xyz_lig = np.concatenate([list(xyz[rc].values()) for rc in reschain_lig])
         xyz = np.concatenate(np.array([list(xyz[rc].values()) for rc in reschains if rc not in reschain_lig]))
-        #print(len(xyz_lig),len(xyz))
-        grids = grid_from_xyz(xyz,xyz_lig,gridsize,option=gridoption)
+
+        with open(outprefix+'.grid.pdb','w') as gridout:
+            grids = grid_from_xyz(xyz,xyz_lig,gridsize,option=gridoption,gridout=gridout)
         out.write("Found %d grid points around ligand\n"%(len(grids)))
 
     elif gridoption == 'global':
-        xyz = np.concatenate(np.array([list(xyz[rc].values()) for rc in reschains]))
-        grids = grid_from_xyz(xyz,xyz,gridsize,option=gridoption)
+        xyz = np.concatenate(np.array([list(xyz[rc].values()) for rc in reschains if rc not in maskres]))
+        with open(outprefix+'.grid.pdb','w') as gridout:
+            grids = grid_from_xyz(xyz,xyz,gridsize,option=gridoption,gridout=gridout)
         out.write("Found %d grid points around ligand\n"%(len(grids)))
         
     else:

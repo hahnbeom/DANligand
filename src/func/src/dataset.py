@@ -1,4 +1,3 @@
-
 import sys
 import numpy as np
 import torch
@@ -34,6 +33,7 @@ class Dataset(torch.utils.data.Dataset):
                  debug           = False,
                  nsamples_per_p  = 1,
                  CBonly          = False,
+                 xyz_as_bb       = False, 
                  sample_mode     = 'random',
     ):
         
@@ -53,6 +53,7 @@ class Dataset(torch.utils.data.Dataset):
         self.debug = debug
         self.distance_feat = distance_feat
         self.nsamples_per_p = nsamples_per_p
+        self.xyz_as_bb = xyz_as_bb
         self.sample_mode = sample_mode
         self.CBonly = CBonly
 
@@ -97,9 +98,19 @@ class Dataset(torch.utils.data.Dataset):
         info['sname'] = samples['name'][pindex]
 
         rot_motif,motifidx = None,-1
-        xyz_motif   = samples['xyz'][pindex] #vector
+        xyz_motif  = samples['xyz'][pindex] #vector; set motif position at the origin
+        if self.xyz_as_bb:
+            if 'xyz_bb' in samples:
+                #take CA only for consistency -- should figure out how to use the full bb crds
+                #print(samples['xyz_bb'][pindex].shape)
+                xyz_pred   = samples['xyz_bb'][pindex][1] #vector
+            else:
+                sys.exit("xyz_bb requested but not exist in npz, failed!")
+        else:
+            xyz_pred   = xyz_motif
+        #print(samples['xyz_bb'][pindex][1], samples['xyz'][pindex])
 
-        if 'rot' in samples: rot_motif   = samples['rot'][pindex] #vector
+        if 'rot' in samples: rot_motif   = samples['rot'][pindex] #quaternion"s" (n,4)
         if 'cat' in samples: motifidx    = samples['cat'][pindex] #integer
         
         # receptor features that go into se3        
@@ -156,8 +167,9 @@ class Dataset(torch.utils.data.Dataset):
         if self.randomize_lig > 1e-3:
             dxyz = 2.0*self.randomize_lig*(0.5 - np.random.rand(3))
 
-        # orient around xyz_motif + delta
-        xyz = xyz - xyz_motif - dxyz[None,:]
+        # orient around motif + delta
+        xyz = xyz - xyz_motif + dxyz[None,:]
+        xyz_pred = xyz_pred - xyz_motif + dxyz[None,:] #==dxyz if not-bb
         
         # randomize the rest coordinate
         if self.randomize > 1e-3:
@@ -195,8 +207,8 @@ class Dataset(torch.utils.data.Dataset):
             return False, False, False, info
             
         
-        info['dxyz']  = dxyz
-        info['xyz']   = xyz_motif
+        info['dxyz']  = xyz_pred 
+        info['xyz']   = xyz_motif # where the origin is set
         info['rot']   = rot_motif # may potentially perturb later
         info['r2a'] = torch.tensor(r2amap).float() #originally stored as r2amap
 

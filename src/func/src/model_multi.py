@@ -7,7 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from equivariant_attention.modules import GConvSE3, GNormSE3, get_basis_and_r, GSE3Res, GMaxPooling, GAvgPooling
 from equivariant_attention.fibers import Fiber
-from . import myutils
+from . import myutils, motif
 #import Transformer
 device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
 
@@ -30,6 +30,7 @@ class SE3Transformer(nn.Module):
                  nntypes        = ("SE3T","SE3T","SE3T"),
                  drop_out       = 0.1,
                  outtype        = 'category', #or [list,'binary']
+                 learn_orientation = False,
                  **kwargs):
         super().__init__()
 
@@ -45,9 +46,10 @@ class SE3Transformer(nn.Module):
         self.chkpoint = chkpoint
         self.modeltype = modeltype
         self.nntypes = nntypes
+        self.learn_OR = learn_orientation
 
         if outtype == 'category':
-            self.noutbin = len(myutils.MOTIFS)
+            self.noutbin = len(motif.MOTIFS)
             self.outtype = [-1]
         elif outtype == 'binary':
             self.noutbin = 2
@@ -90,15 +92,18 @@ class SE3Transformer(nn.Module):
                 'in': Fiber(2, structure=inputf_atm),
                 'mid': Fiber(self.num_degrees, self.num_channels[2]),
                 'out': Fiber(2, structure=[(self.num_degrees*self.num_channels[2],0),
-                                           (2,1)])
+                                           #(2,1)]
+                                           (self.num_degrees*self.num_channels[2],1)]
+                )
             }
-            #'out': Fiber(1, self.num_degrees*self.num_channels[2])}
         else:
             self.fibers_atm = {
                 'in': Fiber(1, self.num_channels[2]),
                 'mid': Fiber(self.num_degrees, self.num_channels[2]),
                 'out': Fiber(2, structure=[(self.num_degrees*self.num_channels[2],0),
-                                           (2,1)])
+                                           #(2,1)]
+                                           (self.num_degrees*self.num_channels[2],1)]
+                )
             }
 
         self.Gblock_atm = self._build_SE3gcn(self.fibers_atm, 1, 2)
@@ -111,6 +116,8 @@ class SE3Transformer(nn.Module):
         # 1. category
         Cblock = []
         Wblock = []
+        Tblock = []
+        Qblock = []
         for key in self.outtype:
             Cblock.append(nn.Linear(self.num_degrees*self.num_channels[2],
                                     self.num_degrees*self.num_channels[2]))
@@ -119,7 +126,6 @@ class SE3Transformer(nn.Module):
             # convert nfeatures -> category
             Cblock.append(nn.Linear(self.num_degrees*self.num_channels[2],
                                     self.noutbin)) #nmetal (w/ none)
-            #self.Cblock[key] = Cblock #nn.ModuleList(Cblock)
 
             Wblock.append(nn.Linear(self.num_degrees*self.num_channels[2],
                                     self.num_degrees*self.num_channels[2]))
@@ -127,15 +133,23 @@ class SE3Transformer(nn.Module):
             Wblock.append(nn.ReLU(inplace=True))
             Wblock.append(nn.Linear(self.num_degrees*self.num_channels[2], 1))
             #Wblock.append(nn.Sigmoid()) #not do this
-            #self.Wblock[key] = Wblock
+
+            # orientation (quaternion) from single l1
+            # how to guaruntee |q| = 1?
+            if self.learn_OR:
+                Tblock.append(nn.Linear(self.num_degrees*self.num_channels[2],
+                                        self.num_degrees*self.num_channels[2]))
+                Tblock.append(nn.Linear(self.num_degrees*self.num_channels[2], 1))
+                
+                Qblock.append(nn.Linear(3*self.num_degrees*self.num_channels[2],
+                                        self.num_degrees*self.num_channels[2]))
+                Qblock.append(nn.Linear(self.num_degrees*self.num_channels[2], 4))
             
         self.Cblock = nn.ModuleList(Cblock)
         self.Wblock = nn.ModuleList(Wblock)
-        #self.Cblock = nn.ModuleDict(Cblocks)
-        #self.Wblock = nn.ModuleDict(Wblocks)
         
-        # 2. dxyz/rot
-        # necessary to add more layers here?
+        self.Tblock = nn.ModuleList(Tblock) #translation
+        self.Qblock = nn.ModuleList(Qblock) #orientation
 
     # out_dim unused
     def _build_SE3gcn(self, fibers, out_dim, g_index, nntype='SE3T'):
@@ -254,6 +268,7 @@ class SE3Transformer(nn.Module):
                     h_atm = (self.linear_atm(torch.cat([h_atmd,h_r2a],axis=1))[...,None],h_atm[1])
 
         #print(len(h_atm))
+        # N x 32*2 x 3
         h_atml0 = h_atm[0].requires_grad_(True).squeeze(2)
         h_atml1 = h_atm[1].requires_grad_(True)
 
@@ -265,10 +280,22 @@ class SE3Transformer(nn.Module):
         # 1. category
         nc = int(len(self.Cblock)/len(self.outtype))
         nw = int(len(self.Wblock)/len(self.outtype))
+        nq = int(len(self.Qblock)/len(self.outtype))
 
         # works only for single batch!
         n = h_atml0.shape[0]
+
+        # dxyz/orientation prediction
+        # straight from lig-node
+        l1_lig = h_atml1[0,:,:]
+        #dxyz = h_atml1[0,:,:] #64 x 1
+        #rot0 = h_atml1[0,:,:] #64 x 2
+        
+        # walk through each func group defined
         logits_all = []
+        dxyz_all = []
+        orientations_all = []
+
         for i,key in enumerate(self.outtype):
             b,e = i*nc,(i+1)*nc
             cat = h_atml0
@@ -279,17 +306,32 @@ class SE3Transformer(nn.Module):
             w = h_atml0
             for layer in self.Wblock[b:e]: w = layer(w)
 
+            ## Category
             # average pooling
             w = torch.transpose(w,0,1)/n
             logit = torch.matmul(w,cat)[None,:,:] # 1,1,2
             logits_all.append(logit)
 
+            ## Rotation
+            # process rot0 to learn per-functype orientation (i.e. quaternion)
+            if self.learn_OR:
+                b,e = i*nq,(i+1)*nq
+
+                t = torch.transpose(l1_lig,0,1)
+                q = torch.flatten(l1_lig)
+
+                for layer in self.Tblock[b:e]: t = layer(t)
+                for layer in self.Qblock[b:e]: q = layer(q)
+
+                t = torch.squeeze(t)
+                q = q/torch.sqrt(torch.sum(q*q)) #normalize
+                dxyz_all.append(t)
+                orientations_all.append(q)
+
         logits_all = torch.cat(logits_all,dim=1)
+        dxyz_all = torch.cat(dxyz_all,dim=0).reshape(len(dxyz_all),3)
+        orientations_all = torch.cat(orientations_all,dim=0).reshape(len(dxyz_all),4)
         Pall = torch.nn.functional.softmax(logits_all,dim=2) + 1.0e-6
 
-        # 2. dxyz/orientation prediction
-        # straight from lig-node
-        dxyz = h_atml1[0,0] 
-        rot = h_atml1[1,0] 
-
-        return Pall, dxyz, rot
+        #print(Pall.shape, dxyz_all.shape, orientations_all.shape)
+        return Pall, dxyz_all, orientations_all

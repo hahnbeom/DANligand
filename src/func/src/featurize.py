@@ -5,6 +5,7 @@ import os,sys
 from scipy.spatial import distance_matrix
 import scipy
 import myutils
+import motif
 
 def sasa_from_xyz(xyz,reschains,atmres_rec):
     #dmtrx
@@ -124,11 +125,10 @@ def detect_motif(xyz,reschain,reschains,motif_atms,masksize=3):
     # skip if any atom doesn't exist
     try:
         motifxyzs = np.array([xyz[reschain][atm] for atm in motif_atms])
+        bbxyzs    = np.array([xyz[reschain][atm] for atm in ['N','CA','C']])
     except:
         return [],[],[],[]
     
-    mxyz = np.array(xyz[reschain][motif_atms[0]])[None,:]
-
     # mask out -mask~+mask residues
     ires = reschains.index(reschain)
     
@@ -164,10 +164,7 @@ def detect_motif(xyz,reschain,reschains,motif_atms,masksize=3):
     #if len(direct_contact) > 0:
     #    print(reschain, motif_atms, direct_contact, rc_env[direct_contact])
 
-    # todo
-    mrot     = np.array([0.0,0.0,0.0])
-    
-    return mxyz,mrot,direct_contact,adj
+    return motifxyzs,bbxyzs,direct_contact,adj
 
 def get_motifs_from_hotspot(txt,aas,xyz,reschains,masksize=3):
     motifs = []
@@ -185,7 +182,7 @@ def get_motifs_from_hotspot(txt,aas,xyz,reschains,masksize=3):
         dEcut = -2.0
 
         aa = aas[reschains.index(reschain)]
-        if aa not in myutils.POSSIBLE_MOTIFS: continue
+        if aa not in motif.POSSIBLE_MOTIFS: continue
         
         if aa in ['CYS','SER']:
             dEcut = -1.5
@@ -195,17 +192,24 @@ def get_motifs_from_hotspot(txt,aas,xyz,reschains,masksize=3):
         if dE > dEcut: continue
         
         # then by motif contact
-        for v in myutils.POSSIBLE_MOTIFS[aa]:
+        for v in motif.POSSIBLE_MOTIFS[aa]:
             mtype = v[0]
             motif_atms = v[1:]
-            if myutils.MOTIFS[mtype] == 'bb': continue
-            mxyz,mrot,direct_contact,excl = detect_motif(xyz,reschain,reschains,
-                                                         motif_atms,masksize)
-            #print(excl)
+            if motif.MOTIFS[mtype] == 'bb': continue
+            motifxyzs,bbxyz,direct_contact,excl = detect_motif(xyz,reschain,reschains,
+                                                               motif_atms,masksize)
 
+            if len(motifxyzs) == 0: continue
+            
+            m = motif.MotifClass(motifxyzs,mtype)
+            m.xyz2frame() #xyz -> q,R,T
+
+            mxyz = m.T
+            mrot = np.array(m.qs_symm) # multiple quaternions (for symm)
+            
             #neighidx = [i for i,rc in enumerate(reschains) if rc in neighs20]
             if len(direct_contact) > 0:
-                motifs.append((reschain,mtype,mxyz,mrot,excl))#,neighidx))
+                motifs.append((reschain,mtype,mxyz,bbxyz,mrot,excl))#,neighidx))
                 
     return motifs
 
@@ -214,6 +218,7 @@ def main(tag,verbose=False,
          inputpath = '/home/hpark/decoyset/PDBbind/2018/PPset',
          outpath = './',
          masksize=3,
+         include_fake=True,
          skip_if_exist=True):
 
     if inputpath[-1] != '/': inputpath+='/'
@@ -228,7 +233,7 @@ def main(tag,verbose=False,
     
     # find random fake sites... 
     fakes = []
-    if os.path.exists('%s/fake/%s.fakesites.npz'%(inputpath,tag)):
+    if os.path.exists('%s/fake/%s.fakesites.npz'%(inputpath,tag)) and include_fake:
         fakes = np.load('%s/fake/%s.fakesites.npz'%(inputpath,tag))['fakesites']
         
     npz = "%s/%s.prop.npz"%(outpath,tag)
@@ -238,14 +243,16 @@ def main(tag,verbose=False,
         
     # store per metal; assume receptor xyz is frozen
     xyzs = []
+    xyzs_bb = []
     rots = []
     cats = []
     tags = []
     excls = []
     
-    # true metals
-    for i,(reschain,cat,mxyz,mrot,excl) in enumerate(motifs):
+    # true 
+    for i,(reschain,cat,mxyz,mxyz_bb,mrot,excl) in enumerate(motifs):
         xyzs.append(mxyz)
+        xyzs_bb.append(mxyz_bb)
         rots.append(mrot)
         cats.append(cat) #first goes to "none" (maybe used someday)
         tags.append(tag+'.'+reschain+'.%02d'%cat)
@@ -256,10 +263,11 @@ def main(tag,verbose=False,
         nsel = min(len(fakes),50) # pick max 50 fake sites
         isel = np.random.choice(len(fakes),nsel)
     
-        O = np.array([0.0,0.0,0.0])
+        O = np.array([[1.0,0.0,0.0,0.0]])
         for i in isel:
             mxyz = np.expand_dims(fakes[i],axis=0) #real points are 2-dim
             xyzs.append(mxyz)
+            xyzs_bb.append(mxyz_bb) #is this okay?
             rots.append(O)
             cats.append(0) # None
             excls.append([]) # None
@@ -272,6 +280,7 @@ def main(tag,verbose=False,
     npz = "%s/%s.lig.npz"%(outpath,tag)
     np.savez(npz,
              xyz=xyzs,
+             xyz_bb=xyzs_bb, #list of (3atm x 3)
              rot=rots,
              cat=cats,
              exclude=excls,
