@@ -1,0 +1,5 @@
+echo roc > trgs
+python make_features_aff.py  trgs
+cd roc
+ls roc_seq_21940.lig.npz  > npzs
+python ../../../predict_aff.py  AFFmodel2  npzs
