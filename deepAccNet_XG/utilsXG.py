@@ -87,6 +87,31 @@ gentype2simple = {'CS':0,'CS1':0,'CS3':0,'CST':0,'CSQ':0,'CSp':0,
                   'Ca2p':16, 'Mg2p':17, 'Mn':18, 'Fe2p':19, 'Fe3p':19, 'Zn2p':20, 'Co2p':21, 'Cu2p':22, 'Cd':23
                   }
 
+# AA residue properties
+AAprop = {'netq':[0,0,-1,0,-1,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0],
+          'nchi':[0,1, 2,2, 3,3,2,2,3,0,3,4,4,4,1,1,2,2,1,1],
+          'Kappa':[( 5.000,  2.250,  2.154),
+          (11.000,  6.694,  5.141),
+          ( 8.000,  3.938,  3.746),
+          ( 8.000,  3.938,  4.660),
+          ( 6.000,  3.200,  3.428),          
+          ( 9.000,  4.840,  4.639),
+          ( 9.000,  4.840,  5.592),
+          ( 4.000,  3.000,  2.879),
+          ( 8.100,  4.000,  2.381),
+          ( 8.000,  3.938,  3.841),
+          ( 8.000,  3.938,  3.841),
+          ( 9.000,  6.125,  5.684),
+          ( 8.000,  5.143,  5.389),
+          ( 9.091,  4.793,  3.213),
+          ( 5.143,  2.344,  1.661),
+          ( 6.000,  3.200,  2.809),
+          ( 7.000,  3.061,  2.721),
+          (10.516,  4.680,  2.737),          
+          (10.083,  4.889,  3.324),
+          ( 6.000,  1.633,  1.567)]
+          }
+
 def findAAindex(aa):
     if aa in ALL_AAS:
         return ALL_AAS.index(aa)
@@ -96,7 +121,7 @@ def findAAindex(aa):
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
+def read_params(p,as_list=False,ignore_hisH=True,aaname=None,read_mode='polarH'):
     atms = []
     qs = {}
     atypes = {}
@@ -104,6 +129,7 @@ def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
     
     is_his = False
     repsatm = 0
+    nchi = 0
     for l in open(p):
         words = l[:-1].split()
         if l.startswith('AA'):
@@ -116,28 +142,41 @@ def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
             atm = words[1]
             atype = words[2]
             if atype[0] == 'H':
-                if atype not in ['Hpol','HNbb','HO','HS','HN']:
+                if read_mode == 'heavy':
                     continue
-                if is_his and (atm in ['HE2','HD1']) and ignore_hisH:
+                elif atype not in ['Hpol','HNbb','HO','HS','HN']:
+                    continue
+                elif is_his and (atm in ['HE2','HD1']) and ignore_hisH:
                     continue
                 
             if atype == 'VIRT': continue
             atms.append(atm)
             atypes[atm] = atype
             qs[atm] = float(words[4])
+            
         elif l.startswith('BOND'):
             a1,a2 = words[1:3]
             if a1 not in atms or a2 not in atms: continue
-            bnds.append((a1,a2))
+            border = 1
+            if len(words) >= 4:
+                # 2 for conjugated/double-bond, 4 for ring aromaticity...
+                border = {'1':1,'2':2,'3':3,'CARBOXY':2,'DELOCALIZED':2,'ARO':4,'4':4}[words[3]] 
+            
+            bnds.append((a1,a2)) #,border))
+            
         elif l.startswith('NBR_ATOM'):
             repsatm = atms.index(l[:-1].split()[-1])
+        elif l.startswith('CHI'):
+            nchi += 1
+        elif l.startswith('PROTON_CHI'):
+            nchi -= 1
             
     # bnds:pass as strings
             
     if as_list:
         qs = [qs[atm] for atm in atms]
         atypes = [atypes[atm] for atm in atms]
-    return atms,qs,atypes,bnds,repsatm
+    return atms,qs,atypes,bnds,repsatm,nchi
 
 def read_pdb(pdb,read_ligand=False,aas_allowed=[],
              aas_disallowed=[]):
@@ -289,7 +328,7 @@ def get_AAtype_properties(ignore_hisH=True,
     for aa in AMINOACID+NUCLEICACID+METAL:
         iaa += 1
         p = defaultparams(aa)
-        atms,q,atypes,bnds,repsatm = read_params(p)
+        atms,q,atypes,bnds,repsatm,_ = read_params(p)
         atypes_aa[iaa] = fa2gentype([atypes[atm] for atm in atms])
         qs_aa[iaa] = q
         atms_aa[iaa] = atms
@@ -348,6 +387,19 @@ def read_sasa(f,reschains):
             sasa[res] = 0.25
             cbcount[res] = 0.5
     return cbcount, sasa
+
+def sampleDGonly(fnat):
+    p = fnat<-0.9 #native/near-binder only
+    return p/np.sum(p)
+
+def upsampleCombo1(fnat):
+    nonQA  = fnat<0.0
+    over06 = fnat>0.6
+    over07 = fnat>0.7
+    over08 = fnat>0.8
+    p = over06 + over07 + over08 + 3.0*nonQA #can be different from original...
+    
+    return p/np.sum(p)
 
 def upsample1(fnat):
     over06 = fnat>0.6

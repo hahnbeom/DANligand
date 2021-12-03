@@ -15,7 +15,8 @@ class Dataset(torch.utils.data.Dataset):
     'Characterizes a dataset for PyTorch'
     def __init__(self,
                  targets,
-                 root_dir        = "/projects/ml/ligands/v5/", #featurized with extended aa defs! UNK goes to 0
+                 root_dir        = "/projects/ml/ligands/v5", #featurized with extended aa defs! UNK goes to 0
+                 affinity_info   = '/projects/ml/ligands/PDBbind2018.dG.npz',
                  verbose         = False,
                  useTipNode      = False,
                  ball_radius     = 10,
@@ -33,12 +34,15 @@ class Dataset(torch.utils.data.Dataset):
                  ballmode        = 'com',
                  distance_feat   = 'std',
                  normalize_q     = False,
-                 aa_as_het       = False,
                  debug           = False,
+                 aa_as_het       = False,
                  nsamples_per_p  = 1,
-                 sample_mode     = 'random'
+                 retrieve_affinity = False,
+                 more_resfeatures = False,
+                 sample_mode     = 'random',
     ):
-        
+
+        # combo logic: target name should contain which info it contains
         self.proteins = targets
         
         self.datadir = root_dir
@@ -50,23 +54,30 @@ class Dataset(torch.utils.data.Dataset):
         self.num_channels = num_channels
         self.bndgraph_type = bndgraph_type
         self.ballmode = ballmode #["com","all"]
-        #self.edgemode = edgemode
         self.dist_fn_res = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[0], dcut=edgedist[0])
         self.dist_fn_atm = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[1], dcut=edgedist[1])
         self.debug = debug
         self.distance_feat = distance_feat
         self.nsamples_per_p = nsamples_per_p
-        self.nsamples = max(1,len(self.proteins)*nsamples_per_p)
+
+        if isinstance(nsamples_per_p,int) or isinstance(nsamples_per_p,float):
+            self.nsamples = max(1,len(self.proteins)*nsamples_per_p)
+        elif isinstance(nsamples_per_p,dict):
+            self.nsamples = max(1,len(self.proteins)*sum(nsamples_per_p.values()))
+            
         self.normalize_q = normalize_q
         self.sample_mode = sample_mode
-        self.aa_as_het = aa_as_het
+        self.aa_as_het   = aa_as_het
+        self.more_resfeatures = more_resfeatures
 
         if upsample == None:
             self.upsample = sample_uniform
         else:
             self.upsample = upsample
 
-        self.affinity_digits = affinity_digits
+        self.affinity = []
+        if affinity_info != None:
+            self.affinity = np.load(affinity_info,allow_pickle=True)['dG'].item() #dictionary
 
     def __len__(self):
         'Denotes the total number of samples'
@@ -92,17 +103,17 @@ class Dataset(torch.utils.data.Dataset):
 
         try:
             samples, pindex = self.get_a_sample(pname, index)
+            prop = np.load(self.datadir+pname+".prop.npz")
         except:
-            print("BAD npz!", self.datadir+pname+".lignpz")
+            print("BAD npz!", self.datadir+pname)
             return False, False, False, info
-
         
         sname   = samples['name'][pindex]
         info['pindex'] = pindex
         info['sname'] = sname
+        info['datatype'] = samples['datatype'][pindex]
         
         # receptor features that go into se3        
-        prop = np.load(self.datadir+pname+".prop.npz")
         charges_rec = prop['charge_rec'] 
         atypes_rec  = prop['atypes_rec'] #1-hot
         aas_rec     = prop['aas_rec'] #rec only
@@ -132,13 +143,10 @@ class Dataset(torch.utils.data.Dataset):
         #aa type should directly from feature instead
         #try:
         aas = np.concatenate([aas_lig,aas_rec]).astype(int)
-
-        ''' #until June/20
-        if self.aa_as_het:
-            ismetal = aas>25 #unk,AA,NA
-            aas = ismetal*aas
-        '''
         aas1hot = np.eye(N_AATYPE)[aas]
+        #except:
+        #    print("failed %s"%pname)
+        #    sys.exit()
 
         # representative atoms
         r2a = np.concatenate([np.array([0 for _ in xyz_lig]),r2a])
@@ -147,10 +155,6 @@ class Dataset(torch.utils.data.Dataset):
         # per-res
         repsatm_idx = np.concatenate([np.array(repsatm_lig),np.array(repsatm_idx,dtype=int)+len(xyz_lig)])
     
-        #affinity = -1.0
-        #if 'affinity' in samples:    affinity    = samples['affinity'][pindex]
-        #affinity1hot = get_affinity_1hot(affinity, self.affinity_digits)
-
         # bond properties
         bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
         
@@ -196,18 +200,28 @@ class Dataset(torch.utils.data.Dataset):
             randxyz = 2.0*self.randomize*(0.5 - np.random.rand(len(xyz),3))
             xyz = xyz + randxyz
 
-        if self.aa_as_het:
-            obt_fs = [islig,atypes,sasa,charges]
-        else:
-            obt_fs = [islig,aas1hot,atypes,sasa,charges]
-            
+        resfeat = [islig,aas1hot,sasa]
+        resfeat_extra = [] #from res-index
+        
         try:
-            G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs, obt_fs,
+            if self.more_resfeatures:
+                #get additional res features
+                kappa_lig = samples['kappa'][0].reshape(1,3)
+                resfeat_extra = [np.concatenate([samples['netq'],prop['netq']]),
+                                 np.concatenate([samples['nchi'][0],prop['nchi']]),
+                                 np.concatenate([samples['nheavy'][0],prop['nheavy']]),
+                                 np.concatenate([kappa_lig[:,0],prop['kappa'][:,0]]),
+                                 np.concatenate([kappa_lig[:,1],prop['kappa'][:,1]]),
+                                 np.concatenate([kappa_lig[:,2],prop['kappa'][:,2]])
+                             ]
+
+            G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs,
+                                                         [islig,aas1hot,atypes,sasa,charges],
                                                          bnds, len(xyz_lig) )
 
             rsds_ord = r2a[idx_ord]
-            G_res, r2amap = self.make_res_graph(xyz, center_xyz, [islig,aas1hot,sasa],
-                                                repsatm_idx, rsds_ord)
+            G_res, r2amap = self.make_res_graph(xyz, center_xyz, resfeat,
+                                                repsatm_idx, rsds_ord, resfeat_extra )
 
             # store which indices go to ligand atms
             ligidx = np.zeros((len(idx_ord),len(xyz_lig)))
@@ -216,12 +230,13 @@ class Dataset(torch.utils.data.Dataset):
 
         except:
             if self.debug:
-                G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs, obt_fs,
+                G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs,
+                                                             [islig,aas1hot,atypes,sasa,charges],
                                                              bnds, len(xyz_lig) )
                 
                 rsds_ord = r2a[idx_ord]
-                G_res, r2amap = self.make_res_graph(xyz, center_xyz, [islig,aas1hot,sasa],
-                                                    repsatm_idx, rsds_ord)
+                G_res, r2amap = self.make_res_graph(xyz, center_xyz, resfeat,
+                                                    repsatm_idx, rsds_ord, resfeat_extra )
                 
                 # store which indices go to ligand atms
                 ligidx = np.zeros((len(idx_ord),len(xyz_lig)))
@@ -230,9 +245,13 @@ class Dataset(torch.utils.data.Dataset):
                 
             return False, False, False, info
 
-        
+        affinity = -1.0
+        if self.affinity != []:
+            affinity = -np.log10(self.affinity[pname])
+            
         info['fnat']  = torch.tensor(fnat).float()
         info['lddt']  = torch.tensor(lddt).float()
+        info['dG']    = torch.tensor(affinity).float()
         info['r2amap'] = torch.tensor(r2amap).float()
         info['r2a']   = torch.tensor(r2a1hot).float()
         info['repsatm_idx'] = torch.tensor(repsatm_idx).float()
@@ -245,7 +264,9 @@ class Dataset(torch.utils.data.Dataset):
         samples = np.load(self.datadir+pname+".lig.npz",allow_pickle=True)
         for substr in self.tag_substr:
             pindices += [i for i,n in enumerate(samples['name']) if substr in n]
-        fnats = np.array([samples['fnat'][i] for i in pindices])
+            
+        fnats = np.array([samples['fnat'][i] if samples['datatype'][i] == "QA" else -samples['fnat'][i] for i in pindices])
+        #fnats = np.array([samples['fnat'][i] for i in pindices])
 
         if self.sample_mode == 'random':
             pindex  = np.random.choice(pindices,p=self.upsample(fnats))
@@ -254,7 +275,7 @@ class Dataset(torch.utils.data.Dataset):
         
         return samples, pindex
 
-    def make_res_graph(self, xyz, center_xyz, obt_fs, repsatm_idx, rsds_in_Gatm):
+    def make_res_graph(self, xyz, center_xyz, obt_fs, repsatm_idx, rsds_in_Gatm, extra_fs):
         xyz_reps = xyz[repsatm_idx]
         xyz_reps = torch.tensor(xyz_reps-center_xyz).float()
 
@@ -268,8 +289,10 @@ class Dataset(torch.utils.data.Dataset):
         # rsds_in_Gatm: resno following idx_ord
         r2amap = np.zeros(len(rsds_in_Gatm), dtype=int)
         for i,rsd in enumerate(rsds_in_Gatm):
-            if rsd in indices: r2amap[i] = indices.index(rsd)
-            else: sys.exit("unexpected resno %d"%(rsd)) #should not happen
+            if rsd in indices:
+                r2amap[i] = indices.index(rsd)
+            else:
+                sys.exit("unexpected resno %d"%(rsd)) #should not happen
         # many entries unused in Gatm may left as 0
         r2amap = np.eye(max(indices)+1)[r2amap]
 
@@ -279,6 +302,10 @@ class Dataset(torch.utils.data.Dataset):
         obt  = []
         for f in obt_fs:
             if len(f) > 0: obt.append(f[reps_idx])
+            
+        for f in extra_fs:
+            if len(f) > 0: obt.append(f[indices][:,None]) #should match the size
+
         obt = np.concatenate(obt,axis=-1)
 
         u,v = self.dist_fn_res(xyz_reps[None,])
@@ -475,7 +502,11 @@ def sample_uniform(fnats):
     return np.array([1.0 for _ in fnats])/len(fnats)
 
 def get_affinity_1hot(affinity,digits,soften=0.5):
-    hot1 = np.eye(len(digits))[affinity]
+    # translate
+    ibin = max(0,int(0.5*(affinity-2.0)))
+    if ibin >= len(digits): ibin = len(digits)-1
+    
+    hot1 = np.eye(len(digits))[ibin]
     if soften > 0:
         hot1[:-1] += soften*np.copy(hot1[:-1])
         hot1[1:] += soften*np.copy(hot1[1:])
@@ -517,17 +548,19 @@ def correlation_Pearson( pred, ans ):
     
     return norm/denorm1/denorm2, denorm2
 
-def load_dataset(set_params, generator_params, setsuffix='v5',
-                 f_cotrain=(0.1,0.0,1.0), randomize=0.2 ): #QAtrain,VScross-train,QAvalid
+def load_dataset(set_params, generator_params,
+                 setsuffix="_combo",
+                 randomize=0.2 ): #QAtrain,VScross-train,QAvalid
+
+    root_dir = set_params['root_dir']
+    
     ## QA set & generators
-    train_set = Dataset(np.load("data/train_proteins%s.npy"%setsuffix),
-                        tag_substr=['rigid','flex'],
-                        nsamples_per_p=f_cotrain[0],
+    train_set = Dataset(np.load("data/train%s.npy"%setsuffix),
+                        #root_dir=root_dir,
                         randomize=randomize,
                         **set_params)
-    val_set = Dataset(np.load("data/valid_proteins%s.npy"%setsuffix),
-                      tag_substr=['rigid','flex'],
-                      nsamples_per_p=f_cotrain[2], #~330
+    val_set = Dataset(np.load("data/valid%s.npy"%setsuffix),
+                      #root_dir=root_dir,
                       **set_params)
 
     train_generator = data.DataLoader(train_set,
@@ -537,24 +570,7 @@ def load_dataset(set_params, generator_params, setsuffix='v5',
     valid_generator = data.DataLoader(val_set,
                                       worker_init_fn=lambda _: np.random.seed(),
                                       **generator_params)
+    
+    return train_generator,valid_generator
 
-    ## setup Virtual Screening (VS) generators
-    cross_set_train = Dataset(np.load("data/trainVS_proteins5.npy"), **set_params)
-    cross_set_valid = Dataset(np.load("data/validVS_proteins5.npy"), **set_params)
-    cross_set_train2 = Dataset(np.load("data/train_proteins5.npy"),
-                               tag_substr=['cross'],
-                               nsamples_per_p=f_cotrain[1],
-                               **set_params)
-    
-    trainVS_generator = data.DataLoader(cross_set_train,
-                                        worker_init_fn=lambda _: np.random.seed(),
-                                        **generator_params)
-    trainVS_generator2 = data.DataLoader(cross_set_train2,
-                                         worker_init_fn=lambda _: np.random.seed(),
-                                         **generator_params)
-    validVS_generator = data.DataLoader(cross_set_valid,
-                                        worker_init_fn=lambda _: np.random.seed(),
-                                        **generator_params)
-    
-    return (train_generator,valid_generator,trainVS_generator,trainVS_generator2,validVS_generator)
     
