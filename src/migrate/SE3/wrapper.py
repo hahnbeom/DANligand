@@ -34,7 +34,7 @@ class SE3TransformerWrapper(nn.Module):
         WOblock.append(nn.Linear(32,ntypes,bias=False))
         WOblock.append(nn.ReLU(inplace=True)) #guarantee >0
         
-        WCblock.append(nn.Linear(32,ntypes,bias=False))
+        WCblock.append(nn.Linear(32,ntypes,bias=True)
         WCblock.append(nn.ReLU(inplace=True)) #guarantee >0
         
         WBblock.append(nn.Linear(32,ntypes,bias=False))

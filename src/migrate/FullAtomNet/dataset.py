@@ -10,6 +10,7 @@ import scipy
 
 #sys.path.insert(0,'./')
 from . import myutils
+from . import motif
 
 class Dataset(torch.utils.data.Dataset):
     'Characterizes a dataset for PyTorch'
@@ -17,7 +18,7 @@ class Dataset(torch.utils.data.Dataset):
                  targets,
                  root_dir        = "",
                  verbose         = False,
-                 ball_radius     = 10,
+                 ball_radius     = 12.0,
                  displacement    = "",
                  randomize_lig   = 0.5,
                  randomize       = 0.0,
@@ -26,15 +27,17 @@ class Dataset(torch.utils.data.Dataset):
                  num_channels    = 32,
                  sasa_method     = "sasa",
                  edgemode        = 'distT',
-                 edgek           = (12,12),
-                 edgedist        = (8.0,4.5),
-                 ballmode        = 'com',
+                 edgek           = (0,0),
+                 edgedist        = (10.0,6.0),
+                 ballmode        = 'all',
                  distance_feat   = 'std',
                  debug           = False,
                  nsamples_per_p  = 1,
                  CBonly          = False,
                  xyz_as_bb       = False, 
                  sample_mode     = 'random',
+                 use_l1          = False,
+                 origin_as_node  = False
     ):
         self.proteins = targets
         
@@ -54,6 +57,8 @@ class Dataset(torch.utils.data.Dataset):
         self.xyz_as_bb = xyz_as_bb
         self.sample_mode = sample_mode
         self.CBonly = CBonly
+        self.use_l1 = use_l1
+        self.origin_as_node = origin_as_node
 
         if upsample == None:
             self.upsample = sample_uniform
@@ -72,21 +77,22 @@ class Dataset(torch.utils.data.Dataset):
         info['sname'] = 'none'
         
         skip_this = False
-        if self.nsamples_per_p == 0:
-            skip_this = True
-        else:
-            ip = int(index/self.nsamples_per_p)
-            if ip >= len(self.proteins): skip_this = True
-
+        
         # "proteins" in a format of "protein.idx"
+        ip = int(index/self.nsamples_per_p)
         pname = self.proteins[ip].split('.')[0]
-        pindex = int(self.proteins[ip].split('.')[-1])
-
+        #pindex = int(self.proteins[ip].split('.')[-1])
+        
         if not os.path.exists(self.datadir+pname+'.lig.npz'):
              skip_this = True
         else:
             samples = np.load(self.datadir+pname+'.lig.npz',allow_pickle=True) #motif type & crd only
-            if pindex >= len(samples['name']): skip_this = True
+            #if pindex >= len(samples['name']):
+            #    skip_this = True
+            #else:
+            cats = samples['cat']
+            pindices = np.arange(len(samples['name'])) 
+            pindex = np.random.choice(pindices,p=self.upsample(cats))
 
         if skip_this:
             info['pname'] = 'none'
@@ -119,9 +125,8 @@ class Dataset(torch.utils.data.Dataset):
         atypes_rec  = prop['atypes_rec'] #1-hot
         anames      = prop['atmnames']
         aas_rec     = prop['aas_rec'] #rec only
-        aas1hot = np.eye(myutils.N_AATYPE)[aas_rec]
 
-        #mask neighbor res
+       #mask neighbor res
         if 'exclude' in samples:
             reschains   = [a[0] for a in prop['atmres_rec']]
             exclrc = samples['exclude'][pindex]
@@ -131,13 +136,10 @@ class Dataset(torch.utils.data.Dataset):
                 xyz[iexcl] += 100.0
         
         sasa_rec = prop['sasa_rec']
-        sasa    = np.expand_dims(sasa_rec,axis=1)
         
         # bond properties
         bnds    = prop['bnds_rec']
-        charges = np.expand_dims(charges_rec,axis=1)
         atypes  = np.array([myutils.find_gentype2num(at) for at in atypes_rec]) # string to integers
-        atypes  = np.eye(max(myutils.gentype2num.values())+1)[atypes] # convert integer to 1-hot
             
         # randomize motif coordinate
         dxyz = np.zeros(3)
@@ -147,24 +149,42 @@ class Dataset(torch.utils.data.Dataset):
         # orient around motif + delta
         xyz = xyz - xyz_motif + dxyz[None,:]
         xyz_pred = xyz_pred - xyz_motif + dxyz[None,:] #==dxyz if not-bb
-        
+
         # randomize the rest coordinate
         if self.randomize > 1e-3:
             randxyz = 2.0*self.randomize*(0.5 - np.random.rand(len(xyz),3))
             xyz = xyz + randxyz
 
+        d2o = np.sqrt(np.sum(xyz*xyz,axis=1))
+
         center_xyz = np.zeros((1,3))
         ball_xyzs = [center_xyz] #origin
 
+        ## append "virtual" node at the 0-th place
+        if self.origin_as_node:
+            xyz = np.concatenate([ball_xyzs[0],xyz])
+            anames = np.concatenate([['origin'],anames])
+            aas_rec = np.concatenate([[0], aas_rec]) # unk
+            atypes = np.concatenate([[0],atypes]) #null
+            sasa_rec = np.concatenate([[0.0],sasa_rec]) # 
+            charges_rec = np.concatenate([[0.0],charges_rec])
+            d2o = np.concatenate([[0.0], d2o])
+
+        aas1hot = np.eye(myutils.N_AATYPE)[aas_rec]
+        atypes  = np.eye(max(myutils.gentype2num.values())+1)[atypes] # convert integer to 1-hot
+        sasa    = np.expand_dims(sasa_rec,axis=1)
+        charges = np.expand_dims(charges_rec,axis=1)
+        d2o = d2o[:,None]
+        
         try:
             G_atm = self.make_atm_graphs(xyz, ball_xyzs,
-                                         [aas1hot,atypes,sasa,charges],
-                                         bnds, anames, self.CBonly)
+                                         [aas1hot,atypes,sasa,charges,d2o],
+                                         bnds, anames, self.CBonly, self.use_l1)
 
         except:
             G_atm  = self.make_atm_graphs(xyz, ball_xyzs,
                                           [aas1hot,atypes,sasa,charges],
-                                          bnds, anames, self.CBonly)
+                                          bnds, anames, self.CBonly, self.use_l1)
             print("graphgen fail")
             return False, info
 
@@ -247,7 +267,7 @@ class Dataset(torch.utils.data.Dataset):
         
         return G_res, r2amap
 
-    def make_atm_graphs(self, xyz, ball_xyzs, obt_fs, bnds, atmnames, CBonly=False ):
+    def make_atm_graphs(self, xyz, ball_xyzs, obt_fs, bnds, atmnames, CBonly=False, use_l1=False ):
         # Do KD-ball neighbour search -- grabbing a <dist neighbor from ligcom
         kd      = scipy.spatial.cKDTree(xyz)
         indices = []
@@ -260,11 +280,12 @@ class Dataset(torch.utils.data.Dataset):
 
         # concatenate all one-body-features
         obt  = []
-        for f in obt_fs:
+        for i,f in enumerate(obt_fs):
             if len(f) > 0: obt.append(f[idx_ord])
         obt = np.concatenate(obt,axis=-1)
-        
+
         xyz     = xyz[idx_ord]
+            
         bnds    = [bnd for bnd in bnds if (bnd[0] in idx_ord) and (bnd[1] in idx_ord)]
         bnds_bin = np.zeros((len(xyz),len(xyz)))
         for i,j in bnds:
@@ -292,11 +313,13 @@ class Dataset(torch.utils.data.Dataset):
         # G_atm: graph for all atms
         G_atm = dgl.graph((u,v))
         G_atm.ndata['attr'] = torch.tensor(obt).float() 
-        G_atm.ndata['x'] = xyz[:,None,:]
-        G_atm.edata['attr'] = w1hot #; 
-        #G_atm.edata['d'] = xyz[v] - xyz[u] #neccesary?
+        G_atm.edata['attr'] = w1hot #;  'd' previously
         G_atm.edata['rel_pos'] = dX[:,u,v].float()[0]
-        G_atm.edata['w'] = w1hot #neccesary?
+
+        if use_l1:
+            G_atm.ndata['x'] = xyz[:,None,:] # unused?
+        #G_atm.edata['d'] = xyz[v] - xyz[u] #neccesary?
+        #G_atm.edata['w'] = w1hot #neccesary? #unused
 
         return G_atm
     
@@ -338,6 +361,10 @@ def get_dist_neighbors(X, mode="topk", top_k=16, dcut=4.5, eps=1E-6):
 def sample_uniform(fnats):
     return np.array([1.0 for _ in fnats])/len(fnats)
 
+def upsample_category(cat):
+    p = motif.sampling_weights[cat]
+    return p/np.sum(p)
+
 def get_affinity_1hot(affinity,digits,soften=0.5):
     # translate
     ibin = max(0,int(0.5*(affinity-2.0)))
@@ -360,7 +387,10 @@ def collate(samples):
         bG = dgl.batch(samples)
 
         # below contains l0 features only
-        node_feature = {"0": bG.ndata["attr"][:,:,None].float()}
+        if 'x' in bG.ndata:
+            node_feature = {"0": bG.ndata["attr"][:,:,None].float(), "1": bG.ndata["x"].float()} #1: 3D, N x 1 x 3
+        else:
+            node_feature = {"0": bG.ndata["attr"][:,:,None].float()}
         edge_feature = {"0": bG.edata["attr"][:,:,None].float()}
     
         return bG, node_feature, edge_feature, info

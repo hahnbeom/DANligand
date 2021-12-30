@@ -12,15 +12,19 @@ class SE3TransformerWrapper(nn.Module):
     """SE(3) equivariant GCN with attention"""
     def __init__(self, num_layers=2, num_channels=32, num_degrees=3, n_heads=4, div=4,
                  l0_in_features=32, l0_out_features=32,
-                 l1_in_features=3, l1_out_features=2,
-                 num_edge_features=32, ntypes=15):
+                 l1_in_features=0, l1_out_features=2,
+                 num_edge_features=32, ntypes=15,
+                 bias=True):
         super().__init__()
-        
+
+        fiber_in = Fiber({0: l0_in_features}) if l1_in_features == 0 \
+            else Fiber({0: l0_in_features, 1: l1_in_features})
+
         self.se3 = SE3Transformer(
             num_layers   = num_layers,
             num_heads    = 4,
             channels_div = 4,
-            fiber_in=Fiber({0: l0_in_features}),
+            fiber_in=fiber_in,
             fiber_hidden=Fiber({0: 32, 1:32, 2:32}),
             fiber_out=Fiber({0: 32, 1:l1_out_features}),
             fiber_edge=Fiber({0: num_edge_features}),
@@ -31,24 +35,25 @@ class SE3TransformerWrapper(nn.Module):
         WBblock = [] # weighting block for bb position; per-type
         Cblock = [] 
         Rblock = [] # constant rotation block
-        WOblock.append(nn.Linear(32,ntypes,bias=False))
-        WOblock.append(nn.ReLU(inplace=True)) #guarantee >0
+        #WOblock.append(nn.Linear(32,32,bias=True)) #sync multiplier
+        WOblock.append(nn.Linear(32,l1_out_features,bias=bias)) #sync multiplier
+        WOblock.append(nn.Tanh()) #range -1~1
+        # let weight go anywhere...
+        #WOblock.append(nn.ReLU(inplace=True)) #guarantee >0 
         
-        WCblock.append(nn.Linear(32,32,bias=True))
-        WCblock.append(nn.Linear(32,ntypes,bias=True))
+        WCblock.append(nn.Linear(32,ntypes,bias=False))
         WCblock.append(nn.ReLU(inplace=True)) #guarantee >0
         
         WBblock.append(nn.Linear(32,ntypes,bias=False))
         WBblock.append(nn.ReLU(inplace=True)) #guarantee >0
-
-        #Cblock.append(nn.ReLU(inplace=True)) #guarantee >0
-        for i in range(ntypes):
-            Cblock.append(nn.Linear(32,2,bias=True)) #determines "sign"
-            #Cblock.append(nn.ReLU(inplace=True)) #guarantee >0
-
-            Rblock.append(nn.Linear(3,3,bias=False)) #rotation matrix
         
-        self.WOblock = nn.ModuleList(WOblock)
+        Cblock.append(nn.Linear(32,10,bias=False))
+        Cblock.append(nn.ReLU(inplace=True)) #guarantee >0
+        for i in range(ntypes):
+            Rblock.append(nn.Linear(32,1,bias=False)) #weight vector on each channel!
+            #Rblock.append(nn.Linear(3,3,bias=False)) #rotation matrix
+        
+        self.WOblock = nn.ModuleList(WOblock) #unused
         self.WCblock = nn.ModuleList(WCblock)
         self.WBblock = nn.ModuleList(WBblock)
         self.Cblock = nn.ModuleList(Cblock)
@@ -63,20 +68,11 @@ class SE3TransformerWrapper(nn.Module):
         wo = hs['0'].squeeze(2)
         wb = hs['0'].squeeze(2)
         wc = hs['0'].squeeze(2)
-        
+        c = hs['0'].squeeze(2)
+        v = hs['1']
         for layer in self.WOblock: wo = layer(wo)
         for layer in self.WBblock: wb = layer(wb)
-        for layer in self.WCblock: wc = layer(wc)
-
-        # make per-category linear layers
-        cs = []
-        for i,layer in enumerate(self.Cblock):
-            #if i%2 == 0:
-            c = hs['0'].squeeze(2) #category; Nx32
-            c = layer(c)
-            #if i%2 == 1:
-            cs.append(c)
-
-        cs = torch.stack(cs,dim=0) #ntype x N x 2
+        #for layer in self.WCblock: wc = layer(wc)
+        for layer in self.Cblock: c = layer(c)
         
-        return wo, wb, wc, cs, hs['1'], self.Rblock
+        return wo,wb, c, v, self.Rblock

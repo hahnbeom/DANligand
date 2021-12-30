@@ -10,8 +10,8 @@ MOTIFS = ['None', #0
           'Phe', 'SH', #9 #10
           'CH3', 'CH32', 'SCH3' #11~13
           ]
-SIMPLEMOTIFIDX = [0,
-                  2,4,3,
+SIMPLEMOTIFIDX = [0, 
+                  2,4,3, 
                   3,3,3,
                   2,4,
                   6,6,6,6,6] #0:none 2:acceptor 3:both 4:donor 6:non-Hbonder
@@ -46,6 +46,12 @@ F1H = np.array([0.95,0.55, 0.0]) #2nd atm.A
 F2 = np.array([-1.3, 0.75, 0.0]) #2nd atm.B
 B  = np.array([ 0.0,-1.5, 0.0]) #3rd atm
 FH = np.array([ 0.0, 1.1, 0.0])
+
+
+sampling_weights = 0.5*np.array([0.,  3.,  5., 8., #null, charged
+                                 4.,  1.0, 6., #OH,bb,amide
+                                 6.,  6., #Nx
+                                 2.,   0.,  1.5,  3.,  6.]) #phe/SH/HPs
 
 # by func group
 REFXYZ = [[],
