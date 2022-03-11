@@ -7,34 +7,54 @@ from scipy.spatial.transform import Rotation
 ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "empty node"
 
 class DataSet(torch.utils.data.Dataset):
-    def __init__(self, mol2s, motifnetnpz, n, K, maxT=5.0, dcut_lig=5.0, pert=False ):
-        self.mol2s = mol2s
-        self.Grec = receptor_graph_from_motifnet(motifnetnpz)
+    def __init__(self, targets, K, datapath='data',
+                 n=1, maxT=5.0, dcut_lig=5.0, pert=False ):
+        
+        self.targets = targets
+        self.datapath = datapath
         self.n = n
         self.K = K
         self.dcut_lig = dcut_lig
         self.maxT = maxT
         self.pert = pert
+        
+        self.Grecs = []
+        self.Gligs = []
+        for target in targets:
+            motifnetnpz = self.datapath+'/'+target+'.score.npz'
+            Grec = receptor_graph_from_motifnet(motifnetnpz)
+            self.Grecs.append(Grec)
 
-        self.native = []
-        for mol2 in self.mol2s:
-            tag = mol2.split('/')[-1].split('.')[0]
-            if tag in ['bace1r']:
-                self.native.append('data/bace1.ligand.mol2')
-            else:
-                self.native.append(mol2)
+            mol2 = self.datapath+'/'+target+'.ligand.mol2'
+            Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig)
+            keyidx = identify_keyidx(target, Glig, atms)[:self.K]
+            self.Gligs.append((Glig,keyidx))
             
     def __len__(self):
-        return self.n
+        return self.n*len(self.targets)
     
     def __getitem__(self, index): #N: maximum nodes in batch
-        imol = index%len(self.mol2s)
-        mol2 = self.mol2s[imol]
+        imol = index%len(self.targets)
+        target = self.targets[imol]
+        
+        #motifnetnpz = self.datapath+'/'+target+'.score.npz'
+        #Grec = receptor_graph_from_motifnet(motifnetnpz)
+        Grec = self.Grecs[imol]
 
-        Glig, keyidx = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig)
+        # why preprocessing Glig much important for speed?
+        
+        #Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig)
+        #keyidx = identify_keyidx(target, Glig, atms)[:self.K]
+        Glig,keyidx = self.Gligs[imol]
 
-        natmol2 = self.native[imol]
-        Gnat, keyidx_nat = ligand_graph_from_mol2(natmol2,self.K,dcut=self.dcut_lig)
+        if target in ['bace1r']:
+            natmol2 = '%s/bace1.ligand.mol2'%self.datapath
+            Gnat,_ = ligand_graph_from_mol2(natmol2,self.K,dcut=self.dcut_lig)
+        else:
+            Gnat = Glig
+            
+        # hard-coded
+        keyidx_nat = keyidx
         xyzlig_nat = Gnat.ndata['x']
             
         #label = np.random.permutation(keyidx)[:self.K]
@@ -49,8 +69,10 @@ class DataSet(torch.utils.data.Dataset):
 
             xyz = torch.matmul(Glig.ndata['x']-com,R) + com + t
             Glig.ndata['x'] = xyz
-        
-        return self.Grec, Glig, labelxyz, keyidx #label
+
+        info = {'name':target}
+
+        return Grec, Glig, labelxyz, keyidx, info #label
 
 def receptor_graph_from_motifnet(npz,dcut=1.8,debug=False): # max 26 edges
     data = np.load(npz,allow_pickle=True)
@@ -222,31 +244,18 @@ def ligand_graph_from_mol2(mol2,K,dcut):
 
     G  = dgl.add_self_loop(G)
 
-    # find key idx as
+    return G,atms    
+
+def identify_keyidx(target, Glig, atms):
+    ## find key idx as below -- TODO
     # 1,2 2 max separated atoms along 1-st principal axis
     # 3:
+
+    ## temporary: hard-coded
     # perhaps revisit as 3~4 random fragment centers -- once fragmentization logic implemented
 
-    '''
-    keyidx = []
-    keyxyz = []
-    nneighs_tot = np.sum(nneighs,axis=-1)
-    for k in range(K):
-        #np.argmin(nneighs_tot)
-    '''
-    KEYATOMS = {'ada17':['C10','C9','C13','N1'],
-                'vgfr2':['N1','C23','C19','C1'],
-                'egfr': ['C3','C18','C22','C16'],
-                'hs90a':['N1','C6','C1','C2'],
-                'try1': ['N1','C16','C28','C19'],
-                'aces': ['C1','C2','N1','C5'],
-                'bace1' : ['C1','C19','N1','O2'],
-                'bace1r': ['C1','C18','N4','O1'],
-    }
+    keyatoms = np.load('data/keyatom.def.npz',allow_pickle=True)['keyatms'].item()
 
+    keyidx = [atms.index(a) for a in keyatoms[target]] 
 
-    tag = mol2.split('/')[-1].split('.')[0]
-    keyidx = [atms.index(a) for a in KEYATOMS[tag]] #[0,4,18,9] # hardcoded
-    #print("read ", keyidx, "as key idx")
-    return G, keyidx
-    
+    return keyidx

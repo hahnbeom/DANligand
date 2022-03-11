@@ -6,15 +6,15 @@ import dgl
 import torch.nn as nn
 #import torch.nn.functional as F
 import numpy as np
-from src.model import SE3TransformerWrapper
+from src.model_batch import SE3TransformerWrapper
 import src.dataset as dataset
 from src.myutils import generate_pose, report_attention
 
 device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
 
-MAXEPOCH = 50
-BATCH = 1
-LR = 1.0e-4
+MAXEPOCH = 200
+BATCH = 23 # ~3time faster w/ B=10, ~4 times w/ B=20
+LR = 1.0e-4 #2.0e-3
 K = 4 # num key points
 verbose = False
 
@@ -48,20 +48,21 @@ def custom_loss(prefix, Yrec, Ylig):
         for k in range(K):
             print("%-10s %1d %8.3f"%(prefix, k,float(loss[k])),
                   " %8.3f"*3%tuple(Yrec[k]), "|", " %8.3f"*3%tuple(Ylig[k]))
-        
-    loss_sum = torch.sum(loss)
+
+    N = Yrec.shape[0]
+    loss_sum = torch.sum(loss)/N
     meanD = torch.mean(torch.sqrt(loss))
     if verbose:
         print("%-10s MSE: %8.3f / mean(d): %8.3f"%(prefix, float(loss_sum), meanD))
     return loss_sum, meanD
 
-modelparams = {'num_layers_lig':1,
-               'num_layers_rec':1,
+modelparams = {'num_layers_lig':4,
+               'num_layers_rec':4,
                'dropout':0.1,
-               'num_channels':8,
+               'num_channels':16,
                'l0_out_features':8,
-               'n_heads':1,
-               'div':1,
+               'n_heads':4,
+               'div':4,
                'K':K
 }
 model = SE3TransformerWrapper(**modelparams)
@@ -90,7 +91,7 @@ validset = dataset.DataSet(validmols,K=K,pert=True)
 
 generator_params = {
     'shuffle': False,
-    'num_workers': 5, #1 if '-debug' in sys.argv else 10,
+    'num_workers': 10, #1 if '-debug' in sys.argv else 10,
     'pin_memory': True,
     'collate_fn': collate,
     'batch_size': BATCH,
@@ -113,12 +114,14 @@ for epoch in range(MAXEPOCH):
         G2 = G2.to(device) # lig
 
         M = G2.ndata['x'].shape[0]
-        labelidx = torch.eye(M)[keyidx].to(device) # K x M
+        #labelidx = torch.eye(M)[keyidx].to(device) # B x K x M
+        labelidx = [torch.eye(n)[idx].to(device) for n,idx in zip(G2.batch_num_nodes(),keyidx)]
         labelxyz = labelxyz.to(device)
 
         Yrec,_ = model( G1, G2, labelidx)
 
-        prefix = "TRAIN "+info[0]['name']
+        prefix = "TRAIN %s"%info[0]['name']
+
         loss, mae = custom_loss( prefix, Yrec, labelxyz ) #both are Kx3 coordinates
 
         optimizer.zero_grad()
@@ -127,9 +130,8 @@ for epoch in range(MAXEPOCH):
 
         loss_t.append(loss.cpu().detach().numpy())
         mae_t.append(mae.cpu().detach().numpy())
-
     t1 = time.time()
-    print(f"Time: {t1-t0}")
+    #print(f"Time: {t1-t0}")
 
     # validate by structure generation
     loss_v = []
@@ -140,7 +142,8 @@ for epoch in range(MAXEPOCH):
             G2 = G2.to(device)
             
             M = G2.ndata['x'].shape[0]
-            labelidx = torch.eye(M)[keyidx].to(device) # K x M
+            #labelidx = torch.eye(M)[keyidx].to(device) # K x M
+            labelidx = [torch.eye(n)[idx].to(device) for n,idx in zip(G2.batch_num_nodes(),keyidx)]
             labelxyz = labelxyz.to(device)
 
             Yrec,A = model( G1, G2, labelidx )
