@@ -94,17 +94,19 @@ class SE3TransformerWrapper(nn.Module):
         A_s = []
         Yrec_s = []
         asum,bsum=0,0
-        
+
         for a,b,idx1hot in zip(size1,size2,labelidx):
             
             h_r = hs_rec[asum:asum+a]
-            h_l = hs_lig[bsum:bsum+b]
             x = xyz_rec[asum:asum+a]
 
-            #print(a,b,h_l.shape, idx1hot.shape)
+            h_l = hs_lig[bsum:bsum+b]
+            # make sure
+            
+            #print(a, b, bsum, h_l.shape, idx1hot.shape)
             h_l = nn.functional.relu( self.phi(h_l) ) # M x d
             h_l = torch.matmul(idx1hot,h_l) # K x d
-        
+
             dots = torch.einsum("id,kd->ki",h_r,h_l) # K x N
             A = nn.functional.softmax(self.scale*dots,dim=1) 
 
@@ -116,4 +118,5 @@ class SE3TransformerWrapper(nn.Module):
             bsum += b
 
         Yrec_s = torch.stack(Yrec_s,dim=0)
+        #print(Yrec_s.shape)
         return Yrec_s, A_s #B x ? x ?

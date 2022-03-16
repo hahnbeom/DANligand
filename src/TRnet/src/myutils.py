@@ -1,15 +1,17 @@
 import torch
 
-def rmsd(Y,Yp):
+def rmsd(Y,Yp): # Yp: require_grads
+    device = Y.get_device()
     Y = Y - Y.mean(axis=0)
     Yp = Yp - Yp.mean(axis=0)
 
     # Computation of the covariance matrix
+    # put a little bit of noise to Y
     C = torch.mm(Y.T, Yp)
     
     # Computate optimal rotation matrix using SVD
-    V, S, W = torch.svd(C) 
-    
+    V, S, W = torch.svd(C)
+
     # get sign( det(V)*det(W) ) to ensure right-handedness
     d = torch.ones([3,3]).to(device)
     d[:,-1] = torch.sign(torch.det(V) * torch.det(W))
@@ -38,7 +40,7 @@ def make_pdb(atms,xyz,outf,header=""):
         out.write("ENDMDL\n")
     out.close()
 
-def generate_pose(Y, keyidx, xyzfull, atms, epoch):
+def generate_pose(Y, keyidx, xyzfull, atms=[], epoch=0, report=False):
     make_pdb(atms,xyzfull,"init.pdb")
     Yp = xyzfull[keyidx]
     # find rotation matrix mapping Y to Yp
@@ -54,7 +56,8 @@ def generate_pose(Y, keyidx, xyzfull, atms, epoch):
     Z = torch.einsum( 'ij,jk -> ik', Z, U.T) + T
 
     outf = "epoch%d.pdb"%epoch
-    make_pdb(atms,Z,outf,header="MODEL %d\n"%epoch)
+    if report: make_pdb(atms,Z,outf,header="MODEL %d\n"%epoch)
+    
 
 
 def report_attention(grids, A, epoch):

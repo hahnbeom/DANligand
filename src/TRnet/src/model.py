@@ -94,12 +94,12 @@ class SE3TransformerWrapper(nn.Module):
 
         hs_lig = nn.functional.relu( self.phi(hs_lig) ) # M x d
         hs_lig = torch.matmul(labelidx,hs_lig) # K x d
-        
+
         dots = torch.einsum("id,kd->ki",hs_rec,hs_lig) # K x N
         A = nn.functional.softmax(self.scale*dots,dim=1) 
 
         #print(torch.sum(A,dim=1))
-        
+
         Yrec = torch.einsum("ki,il->kl",A,xyz_rec) # "Weighted sum":  K x N, N x 3 -> k x 3
 
         #for k in range(self.K):
