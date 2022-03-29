@@ -50,7 +50,11 @@ class Dataset(torch.utils.data.Dataset):
         self.sasa_method = sasa_method
         self.num_channels = num_channels
         self.ballmode = ballmode #["com","all"]
-        self.dist_fn_atm = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[1], dcut=edgedist[1])
+        self.edgemode = edgemode
+        self.edgedist = edgedist
+        self.edgek = edgek
+        #self.dist_fn_atm = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[1], dcut=edgedist[1])
+        self.dist_fn_atm = get_dist_neighbors
         self.debug = debug
         self.distance_feat = distance_feat
         self.nsamples_per_p = nsamples_per_p
@@ -79,21 +83,25 @@ class Dataset(torch.utils.data.Dataset):
         skip_this = False
         
         # "proteins" in a format of "protein.idx"
-        ip = int(index/self.nsamples_per_p)
+        ip = int(index/self.nsamples_per_p) #==index
+        
         pname = self.proteins[ip].split('.')[0]
-        #pindex = int(self.proteins[ip].split('.')[-1])
         
         if not os.path.exists(self.datadir+pname+'.lig.npz'):
              skip_this = True
+             cats = []
         else:
             samples = np.load(self.datadir+pname+'.lig.npz',allow_pickle=True) #motif type & crd only
-            #if pindex >= len(samples['name']):
-            #    skip_this = True
-            #else:
-            cats = samples['cat']
-            pindices = np.arange(len(samples['name'])) 
-            pindex = np.random.choice(pindices,p=self.upsample(cats))
+            if 'cat' not in samples or len(samples['cat']) == 0:
+                skip_this = True
+            else:
+                cats = samples['cat']
+                pindices = np.arange(len(samples['name']))
+                pindex = np.random.choice(pindices,p=self.upsample(cats))
 
+        #print("load:", self.datadir+pname+'.lig.npz')
+
+        #print(pname, os.path.exists(self.datadir+pname+'.lig.npz'), len(cats))
         if skip_this:
             info['pname'] = 'none'
             print("failed to read input npz")
@@ -117,7 +125,7 @@ class Dataset(torch.utils.data.Dataset):
         if 'rot' in samples: rot_motif   = samples['rot'][pindex] #quaternion"s" (n,4)
         if 'bases' in samples: motif_y = samples['bases'][pindex][1] # functional group's connectivity
         if 'cat' in samples: motifidx    = samples['cat'][pindex] #integer
-        
+
         # receptor features that go into se3        
         prop = np.load(self.datadir+pname+".prop.npz")
         xyz         = prop['xyz_rec']
@@ -130,10 +138,16 @@ class Dataset(torch.utils.data.Dataset):
         if 'exclude' in samples:
             reschains   = [a[0] for a in prop['atmres_rec']]
             exclrc = samples['exclude'][pindex]
-            if len(exclrc) > 0:
+            #print(pname, "exclrc:", exclrc)
+            if len(exclrc) > 0: 
                 iexcl = np.array([i for i,rc in enumerate(reschains) if rc in exclrc],dtype=int)
+                #print(len(exclrc), len(iexcl))
                 # send away excl atms not to screw up indexing...
                 xyz[iexcl] += 100.0
+
+        # report
+        if self.debug:
+            self.report_xyz(pname+".%d.xyz"%pindex, atypes_rec, xyz, origin=xyz_motif)
         
         sasa_rec = prop['sasa_rec']
         
@@ -205,6 +219,14 @@ class Dataset(torch.utils.data.Dataset):
         G_atm = myutils.remove_self_edges(G_atm)
         
         return G_atm, info
+
+    def report_xyz(self,outname, atypes, xyz, origin=[0,0,0]):
+        out = open(outname,'w')
+        form = '%1s %8.3f %8.3f %8.3f\n'
+        out.write(form%("F",origin[0],origin[1],origin[2]))
+        for i,a in enumerate(atypes):
+            out.write(form%(a[0],xyz[i,0],xyz[i,1],xyz[i,2]))
+        out.close()
             
     def get_a_sample(self,pname,index):
         pindices = []
@@ -298,7 +320,8 @@ class Dataset(torch.utils.data.Dataset):
         
         ## Graph connection: u,v are nedges & pairs to each other; i.e. (u[i],v[i]) are edges for every i
         # for G_atm
-        u,v,dX = self.dist_fn_atm(xyz[None,])
+        u,v,dX = self.dist_fn_atm(xyz[None,], mode=self.edgemode, top_k=self.edgek[1],
+                                  dcut=self.edgedist[1])
 
         #if self.bndgraph_type == 'bonded':
         ub,vb = np.where(bnds_bin)
@@ -474,11 +497,11 @@ def load_dataset(set_params, generator_params, setsuffix):
                       **set_params)
 
     train_generator = data.DataLoader(train_set,
-                                      worker_init_fn=lambda _: np.random.seed(),
+                                      #worker_init_fn=lambda _: np.random.seed(),
                                       **generator_params)
     
     valid_generator = data.DataLoader(val_set,
-                                      worker_init_fn=lambda _: np.random.seed(),
+                                      #worker_init_fn=lambda _: np.random.seed(),
                                       **generator_params)
 
     

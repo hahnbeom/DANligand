@@ -29,7 +29,7 @@ from typing import Dict
 import torch
 from torch import Tensor
 
-from .se3_transformer.runtime.utils import degree_to_dim
+from ..runtime.utils import degree_to_dim
 
 FiberEl = namedtuple('FiberEl', ['degree', 'channels'])
 

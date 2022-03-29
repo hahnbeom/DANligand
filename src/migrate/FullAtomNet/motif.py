@@ -48,10 +48,17 @@ B  = np.array([ 0.0,-1.5, 0.0]) #3rd atm
 FH = np.array([ 0.0, 1.1, 0.0])
 
 
-sampling_weights = 0.5*np.array([0.,  3.,  5., 8., #null, charged
-                                 4.,  1.0, 6., #OH,bb,amide
+# my DB
+sampling_weights = 0.5*np.array([1.,  3.,  5., 8., #null, charged
+                                 4.,  4. , 6., #OH,bb,amide
                                  6.,  6., #Nx
-                                 2.,   0.,  1.5,  3.,  6.]) #phe/SH/HPs
+                                 2.,   0.,  1.5,  1.5,  6.]) #phe/SH/HPs
+
+# my + Hyunuk
+#sampling_weights = np.array([1.0,  2.,  6., 6.,
+#                             2.,  2.5,  2.5,
+#                             3.,  6.,
+#                             1.5,  0.0, 1.0,  1.0, 5.])
 
 # by func group
 REFXYZ = [[],

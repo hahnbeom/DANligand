@@ -30,8 +30,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.cuda.nvtx import range as nvtx_range
+import numpy as np
 
-from .se3_transformer.runtime.utils import degree_to_dim
+from ..runtime.utils import degree_to_dim
 
 
 @lru_cache(maxsize=None)
@@ -104,11 +105,11 @@ def update_basis_with_fused(basis: Dict[str, Tensor],
     num_edges = basis['0,0'].shape[0]
     device = basis['0,0'].device
     dtype = basis['0,0'].dtype
-    sum_dim = sum([degree_to_dim(d) for d in range(max_degree + 1)])
+    sum_dim = torch.sum(torch.tensor([degree_to_dim(d) for d in range(max_degree + 1)]))
 
     # Fused per output degree
     for d_out in range(max_degree + 1):
-        sum_freq = sum([degree_to_dim(min(d, d_out)) for d in range(max_degree + 1)])
+        sum_freq = torch.sum(torch.tensor([degree_to_dim(min(d, d_out)) for d in range(max_degree + 1)]))
         basis_fused = torch.zeros(num_edges, sum_dim, sum_freq, degree_to_dim(d_out) + int(use_pad_trick),
                                   device=device, dtype=dtype)
         acc_d, acc_f = 0, 0
@@ -123,7 +124,7 @@ def update_basis_with_fused(basis: Dict[str, Tensor],
 
     # Fused per input degree
     for d_in in range(max_degree + 1):
-        sum_freq = sum([degree_to_dim(min(d, d_in)) for d in range(max_degree + 1)])
+        sum_freq = torch.sum(torch.tensor([degree_to_dim(min(d, d_in)) for d in range(max_degree + 1)]))
         basis_fused = torch.zeros(num_edges, degree_to_dim(d_in), sum_freq, sum_dim,
                                   device=device, dtype=dtype)
         acc_d, acc_f = 0, 0
@@ -139,9 +140,12 @@ def update_basis_with_fused(basis: Dict[str, Tensor],
     if fully_fused:
         # Fully fused
         # Double sum this way because of JIT script
-        sum_freq = sum([
-            sum([degree_to_dim(min(d_in, d_out)) for d_in in range(max_degree + 1)]) for d_out in range(max_degree + 1)
-        ])
+        #sum_freq = sum([
+        #    torch.sum(torch.tensor([degree_to_dim(min(d_in, d_out)) for d_in in range(max_degree + 1)]) for d_out in range(max_degree + 1))
+        #])
+        sum_freq = torch.sum(torch.tensor([
+            torch.sum(torch.tensor([degree_to_dim(min(d_in, d_out)) for d_in in range(max_degree + 1)])) for d_out in range(max_degree + 1)]))
+        #sum_freq = torch.sum(torch.tensor([degree_to_dim(min(d_in, d_out)) for d_in in range(max_degree + 1)]) for d_out in range(max_degree + 1))
         basis_fused = torch.zeros(num_edges, sum_dim, sum_freq, sum_dim, device=device, dtype=dtype)
 
         acc_d, acc_f = 0, 0

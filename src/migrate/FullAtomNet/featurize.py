@@ -139,9 +139,10 @@ def detect_motif(xyz,reschain,reschains,motif_atms,masksize=3):
     c = reschain.split('.')[0]
     r = int(reschains_noins[reschains.index(reschain)].split('.')[1])
 
-    if masksize == 999:
+    if masksize >= 999:
         adj = [rc for i,rc in enumerate(reschains) \
                if reschains_noins[i].split('.')[0] == reschain.split('.')[0]]
+        print(len(adj))
     else:
         b = max(0,ires-masksize)
         e = min(len(reschains)-1,ires+masksize)

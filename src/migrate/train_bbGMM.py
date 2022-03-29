@@ -28,7 +28,7 @@ nGMM = 3 # num gaussian functions
 w_reg = 1e-5
 LR = 1.0e-4
 
-model = SE3TransformerWrapper( num_layers=4,
+model = SE3TransformerWrapper( num_layers=6,
                                l0_in_features=65+N_AATYPE+3, num_edge_features=2,
                                l0_out_features=ntypes, #category only
                                l1_out_features=n_l1out,
@@ -38,10 +38,10 @@ print("Nparams:", count_parameters(model))
 
 params_loader = {
           'shuffle': True,
-          'num_workers': 2 if '-debug' not in sys.argv else 1,
+          'num_workers': 5 if '-debug' not in sys.argv else 1,
           'pin_memory': True,
           'collate_fn': collate,
-          'batch_size': 2 if '-debug' not in sys.argv else 1}
+          'batch_size': 5 if '-debug' not in sys.argv else 1}
 
 
 def sample1(cat):
@@ -62,8 +62,8 @@ set_params = {
     #'edgedist'     : (10.0,6.0), 
     #'distance_feat': 'std',
     "xyz_as_bb"    : True,
-    #"upsample"     : upsample_category,
-    "upsample"     : sample1,
+    "upsample"     : upsample_category,
+    #"upsample"     : sample1,
     "randomize"    : 0.2, # Ang, pert the rest
     "randomize_lig": 0.5, # Ang, pert the motif coord! #reduce noise...
     #"CBonly"       : ('-CB' in sys.argv),
