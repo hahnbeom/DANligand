@@ -85,7 +85,7 @@ class Dataset(torch.utils.data.Dataset):
         # "proteins" in a format of "protein.idx"
         ip = int(index/self.nsamples_per_p) #==index
         
-        pname = self.proteins[ip].split('.')[0]
+        pname = self.proteins[ip].split('/')[-1].split('.')[0]
         
         if not os.path.exists(self.datadir+pname+'.lig.npz'):
              skip_this = True
