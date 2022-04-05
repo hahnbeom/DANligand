@@ -140,6 +140,7 @@ class Dataset(torch.utils.data.Dataset):
         
         # orient around grid center
         xyz = xyz - grid_com
+        grids = grids - grid_com
 
         # randomize the rest coordinate
         if self.randomize > 1e-3:
@@ -165,6 +166,8 @@ class Dataset(torch.utils.data.Dataset):
         d2o = d2o[:,None]
 
         
+        #natm = xyz.shape[0]-grids.shape[0] # real atoms
+        
         #try:
         G_atm = self.make_atm_graphs(xyz, grids,
                                      [aas1hot,atypes,sasa,charges,d2o],
@@ -178,7 +181,7 @@ class Dataset(torch.utils.data.Dataset):
         #    return False, info
        
         # works up to 5layers 
-        if not G_atm or G_atm.number_of_nodes() > 3000 or G_atm.number_of_edges() > 30000:
+        if not G_atm or G_atm.number_of_nodes() > 5000 or G_atm.number_of_edges() > 50000:
             if G_atm:
                 print("skip this (name/grid/node/edge): ", info["pname"], grids.shape[0],
                       G_atm.number_of_nodes(), G_atm.number_of_edges())
@@ -274,7 +277,7 @@ class Dataset(torch.utils.data.Dataset):
         indices = []
         kd_ca   = scipy.spatial.cKDTree(grids)
         indices = np.concatenate(kd_ca.query_ball_tree(kd, self.ball_radius))
-            
+
         idx_ord = list(np.array(np.unique(indices),dtype=np.int16))
         if CBonly:
             idx_ord = [i for i in idx_ord if atmnames[i] in ['N','CA','C','O','CB']]
@@ -289,9 +292,7 @@ class Dataset(torch.utils.data.Dataset):
         obt = np.concatenate(obt,axis=-1)
 
         xyz     = xyz[idx_ord]
-        
         natm = xyz.shape[0]-grids.shape[0] # real atoms
-            
         
         bnds    = [bnd for bnd in bnds if (bnd[0] in idx_ord) and (bnd[1] in idx_ord)]
         bnds_bin = np.zeros((len(xyz),len(xyz)))
@@ -318,9 +319,15 @@ class Dataset(torch.utils.data.Dataset):
         D = torch.sqrt(torch.sum(dX[0]*dX[0],dim=-1))
         
         t1 = time.time()
+        
         incl = [i for i in range(N) if (u[i] < natm or v[i] < natm) or D[u[i],v[i]] < self.edgedist[0]]
+        
+        n1 = len([i for i in range(N) if (u[i] < natm or v[i] < natm)])
+        n2 = len([i for i in range(N) if D[u[i],v[i]] < self.edgedist[0]])
+        
         u = u[incl]
         v = v[incl]
+        
   
         #if self.bndgraph_type == 'bonded':
         ub,vb = np.where(bnds_bin)

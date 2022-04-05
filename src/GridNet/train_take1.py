@@ -19,7 +19,7 @@ LR = 1.0e-4
 w_contrast = 1.0
 w_false = 0.2/ntypes # 0.2: releate importance; 1.0/ntypes null contribution
 
-model = SE3TransformerWrapper( num_layers=3,
+model = SE3TransformerWrapper( num_layers=4,
                                l0_in_features=65+N_AATYPE+3,
                                num_edge_features=3, #1-hot bond type x 2, distance 
                                l0_out_features=ntypes, #category only
@@ -39,7 +39,7 @@ params_loader = {
 set_params = {
     'root_dir'     : "/home/hpark/data/HmapMine/features.grid/",
     'ball_radius'  : 12.0,
-    'edgedist'     : (2.0,4.5), 
+    'edgedist'     : (2.6,4.5), 
     #"upsample"     : sample1,
     "randomize"    : 0.2, # Ang, pert the rest
     "randomize_lig": 0.5, # Ang, pert the motif coord! #reduce noise...
@@ -135,7 +135,9 @@ for epoch in range(start_epoch, max_epochs):
     b_count,e_count=0,0
     temp_loss = {"total":[], "BCEg":[], "BCEr":[], "contrast":[], "reg":[]}
     for G, node, edge, info in train_loader:
-        if G == None: continue
+        if G == None:
+            e_count += 1
+            continue
         # Get prediction and target value
     
         pred = model(to_cuda(G, device), to_cuda(node, device), to_cuda(edge, device))
@@ -169,16 +171,15 @@ for epoch in range(start_epoch, max_epochs):
         if (b_count+1)%accum == 0:
             optimizer.step()
             optimizer.zero_grad()
-            print("TRAIN Epoch(%s): [%2d/%2d], Batch: [%2d/%2d], loss: %.3f (%.3f/%.3f/%.3f)"
+            print("TRAIN Epoch(%s): [%2d/%2d], Batch: [%2d/%2d], loss: %.3f (%.3f/%.3f/%.3f) error %d"
               %(modelname, epoch, max_epochs, b_count, len(train_loader),
                 np.sum(temp_loss["total"][-1*accum:]),
                 np.sum(temp_loss["BCEg"][-1*accum:]),
                 np.sum(temp_loss["BCEr"][-1*accum:]),
-                np.sum(temp_loss["contrast"][-1*accum:])))
+                np.sum(temp_loss["contrast"][-1*accum:]),
+                e_count))
             
             b_count += 1
-        else:
-            e_count += 1
             
     # Empty the grad anyways
     optimizer.zero_grad()

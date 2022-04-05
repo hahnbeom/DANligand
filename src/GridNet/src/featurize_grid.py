@@ -155,7 +155,7 @@ def gridize(xyzs_rec,xyzs_lig,
     incl = np.concatenate(kd_ca.query_ball_tree(kd, contact))
     ilig = np.concatenate(kd_lig.query_ball_tree(kd, contact))
     
-    interface = np.array([i for i in incl if i not in excl and i in ilig],dtype=np.int16)
+    interface = np.unique(np.array([i for i in incl if (i not in excl and i in ilig)],dtype=np.int16))
     grids = grids[interface]
 
     print("Search through %d grid points, of %d contact grids %d clash -> %d"%(nfull,len(incl),len(excl),len(grids)))
@@ -176,7 +176,8 @@ def gridize(xyzs_rec,xyzs_lig,
 
     dv2xyz = np.array([[g-x for g in grids[indices_true]] for x in xyzs_true]) # grids x numTrue
     d2xyz = np.sum(dv2xyz*dv2xyz,axis=2)
-    overlap = np.exp(-d2xyz)
+    overlap = np.exp(-d2xyz/gridsize/gridsize)
+    #overlap = np.exp(-d2xyz)
         
     N = len(motif.MOTIFS)
     label = np.zeros((len(grids),N))
@@ -191,6 +192,7 @@ def gridize(xyzs_rec,xyzs_lig,
     nlabeled = 0
     for i,l in enumerate(label):
         grid = grids[i]
+        #print(grid, max(l))
         if max(l) > 0.01:
             imotif = np.argmax(l)
             B = np.sqrt(max(l))
