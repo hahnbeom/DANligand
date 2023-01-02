@@ -2,7 +2,7 @@ import sys
 import numpy as np
 import torch
 import dgl
-from .myutils import *
+from .utilsXG import *
 from torch.utils import data
 from os import listdir
 from os.path import join, isdir, isfile
@@ -14,31 +14,34 @@ sys.path.insert(0,'./')
 class Dataset(torch.utils.data.Dataset):
     'Characterizes a dataset for PyTorch'
     def __init__(self,
-                 featuref,
-                 root_dir        = "/projects/ml/ligands/v4/",
+                 targets,
+                 root_dir        = "/projects/ml/ligands/v5/", #featurized with extended aa defs! UNK goes to 0
                  verbose         = False,
                  useTipNode      = False,
-                 ball_radius     = 9.0,
+                 ball_radius     = 10,
                  displacement    = "",
                  randomize       = 0.0,
                  tag_substr      = [''],
                  upsample        = None,
                  num_channels    = 32,
                  affinity_digits = np.array([2,4,6,8,10,12,14]),
-                 sasa_method     = "sasa",
+                 sasa_method     = "none",
                  bndgraph_type   = 'bonded',
-                 edgemode        = 'dist',
-                 edgek           = (0,0),
+                 edgemode        = 'topk',
+                 edgek           = (12,12),
                  edgedist        = (8.0,4.5),
-                 ballmode        = 'all',
+                 ballmode        = 'com',
                  distance_feat   = 'std',
                  normalize_q     = False,
+                 aa_as_het       = False,
                  debug           = False,
-                 sample_mode     = 'serial'
+                 nsamples_per_p  = 1,
+                 sample_mode     = 'random'
     ):
         
+        self.proteins = targets
+        
         self.datadir = root_dir
-        self.featuref = featuref
         self.verbose = verbose
         self.ball_radius = ball_radius
         self.randomize = randomize
@@ -52,12 +55,11 @@ class Dataset(torch.utils.data.Dataset):
         self.dist_fn_atm = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[1], dcut=edgedist[1])
         self.debug = debug
         self.distance_feat = distance_feat
-        
-        if sample_mode == 'serial':
-            self.nsamples = len(np.load(self.datadir+featuref)['name'])
-            
+        self.nsamples_per_p = nsamples_per_p
+        self.nsamples = max(1,len(self.proteins)*nsamples_per_p)
         self.normalize_q = normalize_q
         self.sample_mode = sample_mode
+        self.aa_as_het = aa_as_het
 
         if upsample == None:
             self.upsample = sample_uniform
@@ -72,45 +74,44 @@ class Dataset(torch.utils.data.Dataset):
     
     def __getitem__(self, index):
         # Select a sample decoy
-        #ip = int(index/self.nsamples_per_p)
-        pname = self.featuref
-        
         info = {}
-        info['pname'] = pname
         info['sname'] = 'none'
+        skip_this = False
+        if self.nsamples_per_p == 0:
+            skip_this = True
+        else:
+            ip = int(index/self.nsamples_per_p)
+            if ip >= len(self.proteins): skip_this = True
+
+        if skip_this:
+            info['pname'] = 'none'
+            return False, False, False, info
+        
+        pname = self.proteins[ip]
+        info['pname'] = pname
 
         try:
-            samples = np.load(self.datadir+self.featuref,allow_pickle=True)
+            samples, pindex = self.get_a_sample(pname, index)
         except:
-            print("BAD npz!", self.datadir+self.featuref)
+            print("BAD npz!", self.datadir+pname+".lignpz")
             return False, False, False, info
-        pindex = index%len(samples['name'])
+
         
         sname   = samples['name'][pindex]
         info['pindex'] = pindex
         info['sname'] = sname
         
-        # receptor features that go into se3
-        '''
+        # receptor features that go into se3        
         prop = np.load(self.datadir+pname+".prop.npz")
         charges_rec = prop['charge_rec'] 
         atypes_rec  = prop['atypes_rec'] #1-hot
-        aas         = prop['aas'] #rec only
+        aas_rec     = prop['aas_rec'] #rec only
         repsatm_idx = prop['repsatm_idx'] #representative atm idx for each residue (e.g. CA); receptor only
         r2a         = np.array(prop['residue_idx'],dtype=int) + 1 #add ligand as the first residue
+
         sasa_rec,cbcounts_rec = 0,0
         if 'sasa_rec' in prop: sasa_rec = prop['sasa_rec']
         if 'cbcounts_rec' in prop: cbcounts_rec = prop['cbcounts_rec']
-        # bond properties
-        bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
-        '''
-        charges_rec = samples['charge_rec'][pindex]
-        atypes_rec  = samples['atypes_rec'][pindex] #1-hot
-        aas         = samples['aas'][pindex] #rec only
-        repsatm_idx = samples['repsatm_idx'][pindex] #representative atm idx for each residue (e.g. CA); receptor only
-        r2a         = np.array(samples['residue_idx'][pindex],dtype=int) + 1 #add ligand as the first residue
-        sasa_rec    = samples['sasa_rec'][pindex]
-        bnds_rec    = samples['bnds_rec'][pindex]
         
         # get per-lig features
         xyz_lig = samples['xyz'][pindex]
@@ -121,26 +122,38 @@ class Dataset(torch.utils.data.Dataset):
         atypes_lig  = samples['atypes_lig'][pindex]
         bnds_lig    = samples['bnds_lig'][pindex]
         charges_lig = samples['charge_lig'][pindex]
+        aas_lig      = samples['aas_lig'][pindex]
+        
         if 'repsatm_lig' in samples:
             repsatm_lig = samples['repsatm_lig'][pindex]
         else:
             repsatm_lig = 0
 
-        # shift indices for ligands on receptor-only properties
-        naas = len(residues_and_metals) + 1 #add "ligand type"
-        aas = [naas-1 for _ in xyz_lig] + list(aas)
-        aas1hot = np.eye(naas)[aas]
+        #aa type should directly from feature instead
+        #try:
+        aas = np.concatenate([aas_lig,aas_rec]).astype(int)
 
-        bnds_rec    = bnds_rec + len(xyz_lig) #shift index
-        
+        ''' #until June/20
+        if self.aa_as_het:
+            ismetal = aas>25 #unk,AA,NA
+            aas = ismetal*aas
+        '''
+        aas1hot = np.eye(N_AATYPE)[aas]
+
+        # representative atoms
         r2a = np.concatenate([np.array([0 for _ in xyz_lig]),r2a])
         r2a1hot = np.eye(max(r2a)+1)[r2a]
-        repsatm_idx = np.concatenate([np.array([repsatm_lig]),np.array(repsatm_idx,dtype=int)+len(xyz_lig)])
+        #print(len(repsatm_lig), len(repsatm_idx))
+        # per-res
+        repsatm_idx = np.concatenate([np.array(repsatm_lig),np.array(repsatm_idx,dtype=int)+len(xyz_lig)])
     
         #affinity = -1.0
         #if 'affinity' in samples:    affinity    = samples['affinity'][pindex]
         #affinity1hot = get_affinity_1hot(affinity, self.affinity_digits)
 
+        # bond properties
+        bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
+        
         # concatenate rec & ligand: ligand comes first
         charges = np.expand_dims(np.concatenate([charges_lig, charges_rec]),axis=1)
         if self.normalize_q:
@@ -150,6 +163,9 @@ class Dataset(torch.utils.data.Dataset):
         atypes = np.concatenate([atypes_lig, atypes_rec])
         atypes = np.array([find_gentype2num(at) for at in atypes]) # string to integers
         atypes = np.eye(max(gentype2num.values())+1)[atypes] # convert integer to 1-hot
+
+        islig = np.array([1 for _ in xyz_lig]+[0 for _ in xyz_rec])
+        islig = np.expand_dims(islig,axis=1)
         
         sasa = []
         sasa_lig = np.array([0.5 for _ in xyz_lig]) #neutral value
@@ -179,14 +195,18 @@ class Dataset(torch.utils.data.Dataset):
         if self.randomize > 1e-3:
             randxyz = 2.0*self.randomize*(0.5 - np.random.rand(len(xyz),3))
             xyz = xyz + randxyz
+
+        if self.aa_as_het:
+            obt_fs = [islig,atypes,sasa,charges]
+        else:
+            obt_fs = [islig,aas1hot,atypes,sasa,charges]
             
         try:
-            G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs,
-                                                         [aas1hot,atypes,sasa,charges],
+            G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs, obt_fs,
                                                          bnds, len(xyz_lig) )
 
             rsds_ord = r2a[idx_ord]
-            G_res, r2amap = self.make_res_graph(xyz, center_xyz, [aas1hot,sasa],
+            G_res, r2amap = self.make_res_graph(xyz, center_xyz, [islig,aas1hot,sasa],
                                                 repsatm_idx, rsds_ord)
 
             # store which indices go to ligand atms
@@ -196,12 +216,11 @@ class Dataset(torch.utils.data.Dataset):
 
         except:
             if self.debug:
-                G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs,
-                                                             [aas1hot,atypes,sasa,charges],
+                G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs, obt_fs,
                                                              bnds, len(xyz_lig) )
                 
                 rsds_ord = r2a[idx_ord]
-                G_res, r2amap = self.make_res_graph(xyz, center_xyz, [aas1hot,sasa],
+                G_res, r2amap = self.make_res_graph(xyz, center_xyz, [islig,aas1hot,sasa],
                                                     repsatm_idx, rsds_ord)
                 
                 # store which indices go to ligand atms
@@ -222,9 +241,8 @@ class Dataset(torch.utils.data.Dataset):
             
     def get_a_sample(self,pname,index):
         pindices = []
-        
-        #samples = np.load(self.datadir+pname+".lig.npz",allow_pickle=True)
-        samples = np.load(self.datadir+pname+".features.npz",allow_pickle=True)
+
+        samples = np.load(self.datadir+pname+".lig.npz",allow_pickle=True)
         for substr in self.tag_substr:
             pindices += [i for i,n in enumerate(samples['name']) if substr in n]
         fnats = np.array([samples['fnat'][i] for i in pindices])
@@ -232,7 +250,7 @@ class Dataset(torch.utils.data.Dataset):
         if self.sample_mode == 'random':
             pindex  = np.random.choice(pindices,p=self.upsample(fnats))
         elif self.sample_mode == 'serial':
-            pindex = pindices[index%len(pindices)]
+            pindex = index%len(pindices)
         
         return samples, pindex
 
@@ -498,3 +516,45 @@ def correlation_Pearson( pred, ans ):
     denorm2 = torch.sqrt(torch.sum(ans*ans)+1e-6)
     
     return norm/denorm1/denorm2, denorm2
+
+def load_dataset(set_params, generator_params, setsuffix='v5',
+                 f_cotrain=(0.1,0.0,1.0), randomize=0.2 ): #QAtrain,VScross-train,QAvalid
+    ## QA set & generators
+    train_set = Dataset(np.load("data/train_proteins%s.npy"%setsuffix),
+                        tag_substr=['rigid','flex'],
+                        nsamples_per_p=f_cotrain[0],
+                        randomize=randomize,
+                        **set_params)
+    val_set = Dataset(np.load("data/valid_proteins%s.npy"%setsuffix),
+                      tag_substr=['rigid','flex'],
+                      nsamples_per_p=f_cotrain[2], #~330
+                      **set_params)
+
+    train_generator = data.DataLoader(train_set,
+                                      worker_init_fn=lambda _: np.random.seed(),
+                                      **generator_params)
+
+    valid_generator = data.DataLoader(val_set,
+                                      worker_init_fn=lambda _: np.random.seed(),
+                                      **generator_params)
+
+    ## setup Virtual Screening (VS) generators
+    cross_set_train = Dataset(np.load("data/trainVS_proteins5.npy"), **set_params)
+    cross_set_valid = Dataset(np.load("data/validVS_proteins5.npy"), **set_params)
+    cross_set_train2 = Dataset(np.load("data/train_proteins5.npy"),
+                               tag_substr=['cross'],
+                               nsamples_per_p=f_cotrain[1],
+                               **set_params)
+    
+    trainVS_generator = data.DataLoader(cross_set_train,
+                                        worker_init_fn=lambda _: np.random.seed(),
+                                        **generator_params)
+    trainVS_generator2 = data.DataLoader(cross_set_train2,
+                                         worker_init_fn=lambda _: np.random.seed(),
+                                         **generator_params)
+    validVS_generator = data.DataLoader(cross_set_valid,
+                                        worker_init_fn=lambda _: np.random.seed(),
+                                        **generator_params)
+    
+    return (train_generator,valid_generator,trainVS_generator,trainVS_generator2,validVS_generator)
+    

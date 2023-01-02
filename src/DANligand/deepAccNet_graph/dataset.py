@@ -7,11 +7,6 @@ from torch.utils import data
 from os import listdir
 from os.path import join, isdir, isfile
 from scipy.spatial import distance, distance_matrix
-
-#from torch.utils import data
-from os import listdir
-from os.path import join, isdir, isfile
-from scipy.spatial import distance, distance_matrix
 import scipy
 
 sys.path.insert(0,'./')
@@ -20,22 +15,24 @@ class Dataset(torch.utils.data.Dataset):
     'Characterizes a dataset for PyTorch'
     def __init__(self,
                  targets,
-                 root_dir        = "./",
+                 root_dir        = "/projects/ml/ligands/v4/",
                  verbose         = False,
-                 ball_radius     = 9.0,
+                 useTipNode      = False,
+                 ball_radius     = 10,
                  displacement    = "",
                  randomize       = 0.0,
                  tag_substr      = [''],
                  upsample        = None,
                  num_channels    = 32,
                  affinity_digits = np.array([2,4,6,8,10,12,14]),
-                 sasa_method     = "sasa",
+                 sasa_method     = "none",
                  bndgraph_type   = 'bonded',
-                 edgemode        = 'dist',
-                 edgek           = (  0,  0),
+                 edgemode        = 'topk',
+                 edgek           = (12,12),
                  edgedist        = (8.0,4.5),
-                 ballmode        = 'all',
+                 ballmode        = 'com',
                  distance_feat   = 'std',
+                 normalize_q     = False,
                  debug           = False,
                  nsamples_per_p  = 1,
                  sample_mode     = 'random'
@@ -52,12 +49,14 @@ class Dataset(torch.utils.data.Dataset):
         self.num_channels = num_channels
         self.bndgraph_type = bndgraph_type
         self.ballmode = ballmode #["com","all"]
+        #self.edgemode = edgemode
         self.dist_fn_res = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[0], dcut=edgedist[0])
         self.dist_fn_atm = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[1], dcut=edgedist[1])
         self.debug = debug
         self.distance_feat = distance_feat
         self.nsamples_per_p = nsamples_per_p
         self.nsamples = max(1,len(self.proteins)*nsamples_per_p)
+        self.normalize_q = normalize_q
         self.sample_mode = sample_mode
 
         if upsample == None:
@@ -72,70 +71,27 @@ class Dataset(torch.utils.data.Dataset):
         return int(self.nsamples)
     
     def __getitem__(self, index):
+        if self.nsamples_per_p == 0: return 0
         # Select a sample decoy
-        featuref = self.proteins[index]
+        ip = int(index/self.nsamples_per_p)
+        pname = self.proteins[ip]
+        
         info = {}
-        info['pname'] = featuref
-        
-        # New style
-        '''
+        info['pname'] = pname
+        info['sname'] = 'none'
+
         try:
-            samples = np.load(self.datadir+featuref,allow_pickle=True)
+            samples, pindex = self.get_a_sample(pname, index)
         except:
-            print("BAD npz!", self.datadir+featuref)
+            print("BAD npz!", self.datadir+pname+".lignpz")
             return False, False, False, info
-        pindex = index%len(samples['name'])
         
-        # ligand atms
-        ligatms = samples['ligatms'][pindex]
-        
-        # coordinate
-        xyz_lig = samples['xyz_lig'][pindex]
-        xyz_rec = samples['xyz_rec'][pindex]
-        xyz = np.concatenate([xyz_lig, xyz_rec])
-
-        # residue representatives
-        #repsatm_idx = samples['repsatm_idx'] #representative atm idx for each residue (e.g. CA); receptor only
-        #repsatm_lig = samples['repsatm_lig']
-        #repsatm_idx = np.concatenate([np.array([repsatm_lig]),np.array(repsatm_idx,dtype=int)+len(xyz_lig)])
-        #r2a         = np.array(samples['residue_idx'],dtype=int) + 1 #add ligand as the first residue
-        #r2a = np.concatenate([np.array([0 for _ in ligatms]),r2a])
-        repsatm_idx = samples['repsatm_idx'][pindex]
-        r2a = samples['r2a'][pindex]
-
-        # residue features
-        #sasa_lig = np.array([0.5 for _ in xyz_lig]) #neutral value
-        #sasa = np.expand_dims(np.concatenate([sasa_lig,samples['sasa_rec']]),axis=1)
-        sasa = np.expand_dims(samples['sasa'][pindex],axis=1)
-        
-        naas = len(residues_and_metals) + 1 #add "ligand type"
-        aas = samples['aas'][pindex]
-        aas1hot = np.eye(naas)[aas]
-        
-        # atom features
-        #atypes = np.concatenate([samples['atypes_lig'], samples['atypes_rec']])
-        atypes = samples['atypes'][pindex]
-        atypes = np.array([gentype2num[at] for at in atypes]) # string to integers
-        atypes = np.eye(max(gentype2num.values())+1)[atypes]  # convert integer to 1-hot
-        
-        #charges = np.expand_dims(np.concatenate([samples['charge_lig'], samples['charge_rec']]),axis=1)
-        charges = np.expand_dims(samples['charge'][pindex],axis=1)
-    
-        # edge features
-        #bnds_rec    = prop['bnds_rec'] + len(xyz_lig) #shift index;
-        #bnds_lig    = samples['bnds_lig']
-        #bnds    = np.concatenate([bnds_lig,bnds_rec])
-        bnds = samples['bnds'][pindex]
-        '''
-
-        ## old but working style -- from deepaccnet_graph/dataset.py
-        samples = np.load(self.datadir+'ref.lig.npz',allow_pickle=True)
-        pindex = index
         sname   = samples['name'][pindex]
         info['pindex'] = pindex
         info['sname'] = sname
         
-        prop = np.load(self.datadir+"ref.prop.npz")
+        # receptor features that go into se3        
+        prop = np.load(self.datadir+pname+".prop.npz")
         charges_rec = prop['charge_rec'] 
         atypes_rec  = prop['atypes_rec'] #1-hot
         aas         = prop['aas'] #rec only
@@ -178,6 +134,8 @@ class Dataset(torch.utils.data.Dataset):
         
         # concatenate rec & ligand: ligand comes first
         charges = np.expand_dims(np.concatenate([charges_lig, charges_rec]),axis=1)
+        if self.normalize_q:
+            charges = 1.0/(1.0+np.exp(-2.0*charges))
             
         xyz = np.concatenate([xyz_lig, xyz_rec])
         atypes = np.concatenate([atypes_lig, atypes_rec])
@@ -195,16 +153,25 @@ class Dataset(torch.utils.data.Dataset):
             sasa = np.expand_dims(sasa,axis=1)
             
         bnds    = np.concatenate([bnds_lig,bnds_rec])
-        
+
         # orient around ligand-COM
         center_xyz = np.mean(xyz_lig, axis=0)[None,:] #2-D required...
         xyz = xyz - center_xyz
         xyz_lig = xyz_lig - center_xyz
         center_xyz[:,:] = 0.0
-        ball_xyzs = [a[None,:] for a in xyz_lig]
+        
+        ball_xyzs = []
+        if self.ballmode == 'com':
+            ball_xyzs = [center_xyz]
+        elif self.ballmode == 'all':
+            ball_xyzs = [a[None,:] for a in xyz_lig]
 
-        #try:
-        if True:
+        # randomize coordinate
+        if self.randomize > 1e-3:
+            randxyz = 2.0*self.randomize*(0.5 - np.random.rand(len(xyz),3))
+            xyz = xyz + randxyz
+            
+        try:
             G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs,
                                                          [aas1hot,atypes,sasa,charges],
                                                          bnds, len(xyz_lig) )
@@ -218,18 +185,47 @@ class Dataset(torch.utils.data.Dataset):
             for i in range(len(xyz_lig)): ligidx[i,i] = 1.0
             info['ligidx'] = torch.tensor(ligidx).float()
 
-        #except:
-        else:
+        except:
+            if self.debug:
+                G_bnd, G_atm, idx_ord = self.make_atm_graphs(xyz, ball_xyzs,
+                                                             [aas1hot,atypes,sasa,charges],
+                                                             bnds, len(xyz_lig) )
+                
+                rsds_ord = r2a[idx_ord]
+                G_res, r2amap = self.make_res_graph(xyz, center_xyz, [aas1hot,sasa],
+                                                    repsatm_idx, rsds_ord)
+                
+                # store which indices go to ligand atms
+                ligidx = np.zeros((len(idx_ord),len(xyz_lig)))
+                for i in range(len(xyz_lig)): ligidx[i,i] = 1.0
+                info['ligidx'] = torch.tensor(ligidx).float()
+                
             return False, False, False, info
 
-        info['sname'] = samples['name'][pindex]
+        
+        info['fnat']  = torch.tensor(fnat).float()
+        info['lddt']  = torch.tensor(lddt).float()
         info['r2amap'] = torch.tensor(r2amap).float()
-        info['r2a']   = torch.tensor(rsds_ord).float()
+        info['r2a']   = torch.tensor(r2a1hot).float()
         info['repsatm_idx'] = torch.tensor(repsatm_idx).float()
-        info['ligatms'] = ['A' for _ in xyz_lig]#samples['ligatms'][pindex]
         
         return G_bnd, G_atm, G_res, info
             
+    def get_a_sample(self,pname,index):
+        pindices = []
+        
+        samples = np.load(self.datadir+pname+".lig.npz",allow_pickle=True)
+        for substr in self.tag_substr:
+            pindices += [i for i,n in enumerate(samples['name']) if substr in n]
+        fnats = np.array([samples['fnat'][i] for i in pindices])
+
+        if self.sample_mode == 'random':
+            pindex  = np.random.choice(pindices,p=self.upsample(fnats))
+        elif self.sample_mode == 'serial':
+            pindex = pindices[index%len(pindices)]
+        
+        return samples, pindex
+
     def make_res_graph(self, xyz, center_xyz, obt_fs, repsatm_idx, rsds_in_Gatm):
         xyz_reps = xyz[repsatm_idx]
         xyz_reps = torch.tensor(xyz_reps-center_xyz).float()
@@ -374,6 +370,79 @@ def get_dist_neighbors(X, mode="topk", top_k=16, dcut=4.5, eps=1E-6):
 
     return u,v
 
+def parse_pdbfile(pdbfile):
+    file = open(pdbfile, "r")
+    lines = file.readlines()
+    file.close()
+    
+    lines = [l for l in lines if l.startswith("ATOM")]
+    output = {}
+    for line in lines:
+        if line[13] != "H": 
+            aidx = int(line[6:11])
+            aname = line[12:16].strip()
+            rname = line[17:20].strip()
+            cname = line[21].strip()
+            rindex = int(line[22:26])
+            xcoord = float(line[30:38])
+            ycoord = float(line[38:46])
+            zcoord = float(line[46:54])
+            occupancy = float(line[54:60])
+
+            temp = dict(aidx = aidx,
+                        aname = aname,
+                        rname = rname,
+                        cname = cname,
+                        rindex = rindex,
+                        x = xcoord,
+                        y = ycoord,
+                        z = zcoord,
+                        coord = (xcoord,ycoord,zcoord),
+                        occupancy = occupancy)
+
+            residue = output.get(rindex, {})
+            residue[aname] = temp
+            output[rindex] = residue
+        
+    output2 = []
+    keys = [i for i in output.keys()]
+    keys.sort()
+    for k in keys:
+        temp = output[k]
+        temp["rindex"] = k
+        temp["rname"] = temp["CA"]["rname"]
+        output2.append(temp)
+        
+    return output2
+
+def positional_embedding(length, dup=False, d=20, dmax=80):
+    if not dup: 
+        index = np.arange(length)
+    else:
+        index = np.floor(np.arange(0, length, 0.5))
+    
+    output = []
+    for i in range(d):
+        coef = (1/(10000**(2*i/dmax)))
+        output.append(np.sin(coef*index))
+        output.append(np.cos(coef*index))
+                      
+    return np.array(output)
+
+def get_lddt(decoy, ref, cutoff=15, threshold=[0.5, 1, 2, 4]):
+   
+    # only use parts that are less than 15A in ref structure
+    mask = ref < cutoff
+    for i in range(mask.shape[0]):
+        mask[i,i]=False
+   
+    # Get interactions that are conserved
+    conservation = []
+    for th in threshold:
+        temp = np.multiply((np.abs(decoy-ref) < th), mask)
+        conservation.append(np.sum(temp, axis=0)/np.sum(mask, axis=0))
+    return np.mean(conservation, axis=0)
+
 def sample_uniform(fnats):
     return np.array([1.0 for _ in fnats])/len(fnats)
 
@@ -387,37 +456,14 @@ def get_affinity_1hot(affinity,digits,soften=0.5):
     
 def collate(samples):
     graphs_bnd, graphs_atm, graphs_res, info = map(list, zip(*samples))
-    nbatch = len(samples)
-    binfo = {'pname':[],'sname':[],'ligidx':[],'ligatms':[]}
-    
-    if True:
+    try:
         bgraph_bnd = dgl.batch(graphs_bnd)
         bgraph_atm = dgl.batch(graphs_atm)
         bgraph_res = dgl.batch(graphs_res)
-
-        #info part
-        batch_nress = bgraph_res.batch_num_nodes()
-        batch_natms = bgraph_atm.batch_num_nodes()
-        
-        r2a = np.array([])
-        for k in range(nbatch):
-            binfo['pname'].append(info[k]['pname'])
-            binfo['sname'].append(info[k]['sname'])
-            binfo['ligidx'].append(info[k]['ligidx'])
-            binfo['ligatms'].append(info[k]['ligatms'])
-            
-            r2a_k = info[k]['r2a'] #size natm, value resno
-            if k > 0: r2a_k += batch_nress[k]
-            r2a = np.concatenate([r2a,r2a_k])
-            
-        r2a = r2a.astype(int)
-        r2a1hot = np.eye(sum(batch_nress))[r2a]
-        binfo['r2a'] = torch.tensor(r2a1hot).float()
-        
-    else:
+    except:
         bgraph_bnd,bgraph_atm,bgraph_res = False,False,False
-        
-    return bgraph_bnd, bgraph_atm, bgraph_res, binfo
+    
+    return bgraph_bnd, bgraph_atm, bgraph_res, info
 
 def distance_feature(mode,d,binsize=0.5,maxd=5.0):
     if mode == '1hot':
@@ -432,3 +478,13 @@ def distance_feature(mode,d,binsize=0.5,maxd=5.0):
         feat = 1.0/(1.0+torch.exp(-m*(d-d0)))
         feat = feat.repeat(1,2) # hacky!! make as 2-dim
     return feat
+
+def correlation_Pearson( pred, ans ):
+    pred  = pred - torch.mean(pred)
+    ans   = ans - torch.mean(ans)
+
+    norm = torch.sum(pred*ans)
+    denorm1 = torch.sqrt(torch.sum(pred*pred)+1e-6)
+    denorm2 = torch.sqrt(torch.sum(ans*ans)+1e-6)
+    
+    return norm/denorm1/denorm2, denorm2

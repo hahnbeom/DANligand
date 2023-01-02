@@ -1,6 +1,6 @@
 import numpy as np
 import glob
-from scipy.spatial import distance_matrix
+import os
 
 # Tip atom definitions
 AA_to_tip = {"ALA":"CB", "CYS":"SG", "ASP":"CG", "ASN":"CG", "GLU":"CD",
@@ -9,14 +9,16 @@ AA_to_tip = {"ALA":"CB", "CYS":"SG", "ASP":"CG", "ASN":"CG", "GLU":"CD",
              "VAL":"CB", "TYR":"OH", "TRP":"CH2", "SER":"OG", "THR":"OG1"}
 
 # Residue number definition
-residues= ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU',\
-           'GLY', 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE',\
-           'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL']
-residuemap = dict([(residues[i], i) for i in range(len(residues))])
+AMINOACID = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU',\
+             'GLY', 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE',\
+             'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL']
+residuemap = dict([(AMINOACID[i], i) for i in range(len(AMINOACID))])
+NUCLEICACID = ['ADE','CYT','GUA','THY','URA'] #nucleic acids
 
 METAL = ['CA','ZN','MN','MG','FE','CD','CO']
-residues_and_metals = residues + METAL
+ALL_AAS = ['UNK'] + AMINOACID + NUCLEICACID + METAL
 
+N_AATYPE = len(ALL_AAS)
 
 # minimal sc atom representation (Nx8)
 aa2short={
@@ -85,10 +87,41 @@ gentype2simple = {'CS':0,'CS1':0,'CS3':0,'CST':0,'CSQ':0,'CSp':0,
                   'Ca2p':16, 'Mg2p':17, 'Mn':18, 'Fe2p':19, 'Fe3p':19, 'Zn2p':20, 'Co2p':21, 'Cu2p':22, 'Cd':23
                   }
 
+# AA residue properties
+AAprop = {'netq':[0,0,-1,0,-1,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0],
+          'nchi':[0,1, 2,2, 3,3,2,2,3,0,3,4,4,4,1,1,2,2,1,1],
+          'Kappa':[( 5.000,  2.250,  2.154),
+          (11.000,  6.694,  5.141),
+          ( 8.000,  3.938,  3.746),
+          ( 8.000,  3.938,  4.660),
+          ( 6.000,  3.200,  3.428),          
+          ( 9.000,  4.840,  4.639),
+          ( 9.000,  4.840,  5.592),
+          ( 4.000,  3.000,  2.879),
+          ( 8.100,  4.000,  2.381),
+          ( 8.000,  3.938,  3.841),
+          ( 8.000,  3.938,  3.841),
+          ( 9.000,  6.125,  5.684),
+          ( 8.000,  5.143,  5.389),
+          ( 9.091,  4.793,  3.213),
+          ( 5.143,  2.344,  1.661),
+          ( 6.000,  3.200,  2.809),
+          ( 7.000,  3.061,  2.721),
+          (10.516,  4.680,  2.737),          
+          (10.083,  4.889,  3.324),
+          ( 6.000,  1.633,  1.567)]
+          }
+
+def findAAindex(aa):
+    if aa in ALL_AAS:
+        return ALL_AAS.index(aa)
+    else:
+        return 0 #UNK
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
+def read_params(p,as_list=False,ignore_hisH=True,aaname=None,read_mode='polarH'):
     atms = []
     qs = {}
     atypes = {}
@@ -96,6 +129,7 @@ def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
     
     is_his = False
     repsatm = 0
+    nchi = 0
     for l in open(p):
         words = l[:-1].split()
         if l.startswith('AA'):
@@ -108,34 +142,48 @@ def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
             atm = words[1]
             atype = words[2]
             if atype[0] == 'H':
-                if atype not in ['Hpol','HNbb','HO','HS','HN']:
+                if read_mode == 'heavy':
                     continue
-                if is_his and (atm in ['HE2','HD1']) and ignore_hisH:
+                elif atype not in ['Hpol','HNbb','HO','HS','HN']:
+                    continue
+                elif is_his and (atm in ['HE2','HD1']) and ignore_hisH:
                     continue
                 
             if atype == 'VIRT': continue
             atms.append(atm)
             atypes[atm] = atype
             qs[atm] = float(words[4])
+            
         elif l.startswith('BOND'):
             a1,a2 = words[1:3]
             if a1 not in atms or a2 not in atms: continue
-            bnds.append((a1,a2))
+            border = 1
+            if len(words) >= 4:
+                # 2 for conjugated/double-bond, 4 for ring aromaticity...
+                border = {'1':1,'2':2,'3':3,'CARBOXY':2,'DELOCALIZED':2,'ARO':4,'4':4}[words[3]] 
+            
+            bnds.append((a1,a2)) #,border))
+            
         elif l.startswith('NBR_ATOM'):
             repsatm = atms.index(l[:-1].split()[-1])
+        elif l.startswith('CHI'):
+            nchi += 1
+        elif l.startswith('PROTON_CHI'):
+            nchi -= 1
             
     # bnds:pass as strings
             
     if as_list:
         qs = [qs[atm] for atm in atms]
         atypes = [atypes[atm] for atm in atms]
-    return atms,qs,atypes,bnds,repsatm
+    return atms,qs,atypes,bnds,repsatm,nchi
 
 def read_pdb(pdb,read_ligand=False,aas_allowed=[],
              aas_disallowed=[]):
     resnames = []
     reschains = []
     xyz = {}
+    atms = {}
     
     for l in open(pdb):
         if not (l.startswith('ATOM') or l.startswith('HETATM')): continue
@@ -147,8 +195,12 @@ def read_pdb(pdb,read_ligand=False,aas_allowed=[],
         reschain = l[21]+'.'+l[22:27].strip()
 
         if aa3[:2] in METAL: aa3 = aa3[:2]
-        if aa3 in residues:
+        if aa3 in AMINOACID:
             if atm == 'CA':
+                resnames.append(aa3)
+                reschains.append(reschain)
+        elif aa3 in NUCLEICACID:
+            if atm == "C1'":
                 resnames.append(aa3)
                 reschains.append(reschain)
         elif aa3 in METAL:
@@ -157,13 +209,16 @@ def read_pdb(pdb,read_ligand=False,aas_allowed=[],
         elif read_ligand and reschain not in reschains:
             resnames.append(aa3)
             reschains.append(reschain)
-            
-        if reschain not in xyz: xyz[reschain] = {}
+
+        if reschain not in xyz:
+            xyz[reschain] = {}
+            atms[reschain] = []
         #if 'LG1' in l[30:54]:
         #    l = l.replace('LG1','000')
         xyz[reschain][atm] = [float(l[30:38]),float(l[38:46]),float(l[46:54])]
+        atms[reschain].append(atm)
 
-    return resnames, reschains, xyz
+    return resnames, reschains, xyz, atms
 
 def read_ligand_pdb(pdb,ligres='LG1',read_H=False):
     xyz = []
@@ -224,16 +279,43 @@ def fa2gentype(fats):
            'CAbb':'CS1','CObb':'CDp','CH1':'CS1','CH2':'CS2','CH3':'CS3','COO':'CDp','CH0':'CR','aroC':'CR','CNH2':'CDp',
            'OCbb':'Oad','OOC':'Oat','OH':'Ohx','ONH2':'Oad',
            'S':'Ssl','SH1':'Sth',
-           'HNbb':'HN','HS':'HS','Hpol':'HO'}
+           'HNbb':'HN','HS':'HS','Hpol':'HO',
+           'Phos':'PG5', 'Oet2':'OG3', 'Oet3':'OG3' #Nucleic acids
+    }
 
     gents = []
     for at in fats:
-        gents.append(gts[at])
+        if at in gentype2num:
+            gents.append(at)
+        else:
+            gents.append(gts[at])
     return gents
 
-def get_AAtype_properties(datapath='/software/rosetta/latest/database/chemical/residue_type_sets/fa_standard/residue_types',
-                          include_metal=False,
-                          ignore_hisH=True,
+def defaultparams(aa,
+                  datapath='/software/rosetta/latest/database/chemical/residue_type_sets/fa_standard/residue_types',
+                  extrapath=''):
+    # first search through Rosetta database
+    p = None
+    if aa in AMINOACID:
+        p = '%s/l-caa/%s.params'%(datapath,aa)
+    elif aa in NUCLEICACID:
+        if aa == 'URA':
+            p = '%s/nucleic/rna_phenix/URA_n.params'%(datapath)
+        else:
+            p = '%s/nucleic/dna/%s.params'%(datapath,aa)
+    elif aa in METAL:
+        p = '%s/metal_ions/%s.params'%(datapath,aa)
+        
+    if p != None: return p
+
+    p = '%s/%s.params'%(extrapath,aa)
+    if not os.path.exists(p):
+        p = '%s/LG.params'%(extrapath)
+    if not os.path.exists(p):
+        return None
+    return p
+
+def get_AAtype_properties(ignore_hisH=True,
                           extrapath='',
                           extrainfo={}):
     qs_aa = {}
@@ -241,23 +323,20 @@ def get_AAtype_properties(datapath='/software/rosetta/latest/database/chemical/r
     atms_aa = {}
     bnds_aa = {}
     repsatm_aa = {}
-    for iaa,aa in enumerate(residues):
-        atms,q,atypes,bnds,_ = read_params('%s/l-caa/%s.params'%(datapath,aa))
+    
+    iaa = 0 #"UNK"
+    for aa in AMINOACID+NUCLEICACID+METAL:
+        iaa += 1
+        p = defaultparams(aa)
+        atms,q,atypes,bnds,repsatm,_ = read_params(p)
         atypes_aa[iaa] = fa2gentype([atypes[atm] for atm in atms])
         qs_aa[iaa] = q
         atms_aa[iaa] = atms
         bnds_aa[iaa] = bnds
-        repsatm_aa[iaa] = atms.index('CA')
-
-    if include_metal:
-        for iaa,aa in enumerate(METAL):
-            iaa += 20
-            atms,q,atypes,_,_ = read_params('%s/metal_ions/%s.params'%(datapath,aa))
-            atypes_aa[iaa] = [atypes[atm] for atm in atms] #same atypes
-            qs_aa[iaa] = q
-            atms_aa[iaa] = atms
-            bnds_aa[iaa] = []
-            repsatm_aa[iaa] = 0
+        if aa in AMINOACID:
+            repsatm_aa[iaa] = atms.index('CA')
+        else:
+            repsatm_aa[iaa] = repsatm
 
     if extrapath != '':
         params = glob.glob(extrapath+'/*params')
@@ -309,20 +388,34 @@ def read_sasa(f,reschains):
             cbcount[res] = 0.5
     return cbcount, sasa
 
-def sasa_from_xyz(xyz):
-    #dmtrx
-    D = distance_matrix(xyz,xyz)
-    cbcounts = np.sum(D<12.0,axis=0)-1.0
+def sampleDGonly(fnat):
+    p = fnat<-0.9 #native/near-binder only
+    return p/np.sum(p)
 
-    # convert to apprx sasa
-    cbnorm = cbcounts/50.0
-    sasa = 1.0 - cbnorm**(2.0/3.0)
-    sasa = np.clip(sasa,0.0,1.0)
-    return sasa
+def upsampleCombo1(fnat):
+    nonQA  = fnat<0.0
+    over06 = fnat>0.6
+    over07 = fnat>0.7
+    over08 = fnat>0.8
+    p = over06 + over07 + over08 + 3.0*nonQA #can be different from original...
+    
+    return p/np.sum(p)
 
 def upsample1(fnat):
     over06 = fnat>0.6
     over07 = fnat>0.7
     over08 = fnat>0.8
     p = over06 + over07 + over08 + 1.0 #weight of 1,2,3,4
+    return p/np.sum(p)
+
+def upsample2(fnat):
+    over08 = fnat>0.8
+    p = over08 + 0.01
+    return p/np.sum(p)
+
+def upsampleX(fnat):
+    over08 = fnat>0.8
+    over07 = fnat>0.7
+    under01 = fnat<0.8
+    p = over08 + over07 + under01 + 0.01
     return p/np.sum(p)

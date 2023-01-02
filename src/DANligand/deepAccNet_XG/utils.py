@@ -12,10 +12,14 @@ residues= ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU',\
            'GLY', 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE',\
            'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL']
 residuemap = dict([(residues[i], i) for i in range(len(residues))])
+nas = ['ADE','CYT','GUA','THY','URA'] #nucleic acids
 
 METAL = ['CA','ZN','MN','MG','FE','CD','CO']
-residues_and_metals = residues + METAL
+residues_and_metalsXG = ['UNK'] + residues + nas + METAL 
+residues_and_metalsOLD = residues + METAL
+residues_and_metals = residues_and_metalsOLD
 
+N_AATYPE = len(residues_and_metals)+1 #should be no+1 when UNK goes in...
 
 # minimal sc atom representation (Nx8)
 aa2short={
@@ -276,7 +280,7 @@ def get_AAtype_properties(datapath='/software/rosetta/latest/database/chemical/r
         print("Extra residues read from %s: "%extrapath, list(extrainfo.keys()))
     return qs_aa, atypes_aa, atms_aa, bnds_aa, repsatm_aa
 
-def read_sasa(f,reschains,verbose=False):
+def read_sasa(f,reschains):
     read_cont = False
     cbcount = {}
     sasa = {}
@@ -303,26 +307,26 @@ def read_sasa(f,reschains,verbose=False):
     # assign neutral if missing
     for res in reschains:
         if res not in sasa:
-            if verbose:
-                print("Missing res!", res, "; assign neutral value")
+            print("Missing res!", res, "; assign neutral value")
             sasa[res] = 0.25
             cbcount[res] = 0.5
     return cbcount, sasa
-
-def sasa_from_xyz(xyz):
-    #dmtrx
-    D = distance_matrix(xyz,xyz)
-    cbcounts = np.sum(D<12.0,axis=0)-1.0
-
-    # convert to apprx sasa
-    cbnorm = cbcounts/50.0
-    sasa = 1.0 - cbnorm**(2.0/3.0)
-    sasa = np.clip(sasa,0.0,1.0)
-    return sasa
 
 def upsample1(fnat):
     over06 = fnat>0.6
     over07 = fnat>0.7
     over08 = fnat>0.8
     p = over06 + over07 + over08 + 1.0 #weight of 1,2,3,4
+    return p/np.sum(p)
+
+def upsample2(fnat):
+    over08 = fnat>0.8
+    p = over08 + 0.01
+    return p/np.sum(p)
+
+def upsampleX(fnat):
+    over08 = fnat>0.8
+    over07 = fnat>0.7
+    under01 = fnat<0.8
+    p = over08 + over07 + under01 + 0.01
     return p/np.sum(p)

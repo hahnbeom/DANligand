@@ -8,26 +8,25 @@ from torch.nn import functional as F
 from equivariant_attention.modules import GConvSE3, GNormSE3, get_basis_and_r, GSE3Res, GMaxPooling, GAvgPooling
 from equivariant_attention.fibers import Fiber
 
-
 # # Defining a model
 class SE3Transformer(nn.Module):
     """SE(3) equivariant GCN with attention"""
     # 28: aa-type, 1: q or SA, 65: atype, 32: atm-embedding from bnds
     def __init__(self, 
                  num_layers     = (2,4,4), 
-                 l0_in_features = (65+28+2,28+1,32+32),
-                 l1_in_features = (0,0,0),  
+                 l0_in_features = (65+28+2,28+1,32+28+1),
+                 l1_in_features = (0,0,1),  
                  num_degrees    = 2,
                  num_channels   = (32,32,32),
-                 edge_features  = (2,2,2), #distance &bnd
+                 edge_features  = (10,10,10), #distance (1-hot) (&bnd, optional)
                  div            = (2,2,2),
                  n_heads        = (2,2,2),
                  pooling        = "avg",
                  chkpoint       = True,
-                 modeltype      = 'comm',
+                 modeltype      = 'simple',
                  nntypes        = ("SE3T","SE3T","SE3T"),
                  variable_gcn   = False,
-                 dropout        = 0.0,
+                 drop_out       = 0.1,
                  **kwargs):
         super().__init__()
 
@@ -44,10 +43,9 @@ class SE3Transformer(nn.Module):
         self.modeltype = modeltype
         self.nntypes = nntypes
         self.variable_gcn = variable_gcn
-        self.dropout = dropout
 
         # shared
-        self.drop = nn.Dropout(self.dropout)
+        self.drop = nn.Dropout(drop_out)
 
         # Linear projection layers for each
         self.linear1_bnd = nn.Linear(l0_in_features[0], l0_in_features[0])
@@ -112,7 +110,7 @@ class SE3Transformer(nn.Module):
         PAblock = []
         PAblock.append(nn.Linear(self.fibers_atm['out'].n_features,
                                  self.fibers_atm['out'].n_features))
-        PAblock.append(nn.Dropout(0.1))
+        PAblock.append(nn.Dropout(drop_out))
         PAblock.append(nn.ReLU(inplace=True))
         PAblock.append(nn.Linear(self.fibers_atm['out'].n_features, 1))
         self.PAblock = nn.ModuleList(PAblock)
@@ -121,7 +119,7 @@ class SE3Transformer(nn.Module):
         Wblock = []
         Wblock.append(nn.Linear(self.fibers_atm['out'].n_features,
                                 self.fibers_atm['out'].n_features))
-        Wblock.append(nn.Dropout(0.1)) 
+        Wblock.append(nn.Dropout(drop_out)) 
         Wblock.append(nn.ReLU(inplace=True))
         Wblock.append(nn.Linear(self.fibers_atm['out'].n_features, 1))
         self.Wblock = nn.ModuleList(Wblock)
@@ -146,7 +144,7 @@ class SE3Transformer(nn.Module):
 
         return nn.ModuleList(Gblock)
 
-    def forward(self, G_bnd, G_atm, G_res, r2a, ligidx):
+    def forward(self, G_bnd, G_atm, G_res, idx):
         from torch.utils.checkpoint import checkpoint
         def runlayer(layer, G, r, basis):
             def custom_forward(*h):
@@ -156,8 +154,6 @@ class SE3Transformer(nn.Module):
                 return (h)
             return custom_forward
 
-        #G_bnd.batch_num_edges()
-        
         # Pass l0 features through linear layers to condense to #channels
         #print("?", G_bnd.ndata['0'].squeeze().shape)
         l0_bnd = F.elu(self.linear1_bnd(G_bnd.ndata['0'].squeeze()))
@@ -196,7 +192,7 @@ class SE3Transformer(nn.Module):
         ## Intermediate: from global to pocket-atm graphs
         basis_res, r_res = get_basis_and_r(G_res, self.num_degrees-1)
         basis_atm, r_atm = get_basis_and_r(G_atm, self.num_degrees-1)
-        
+        r2a = idx['r2a'] #1hot
         # reweight by num_atoms
         w = (1.0/(torch.sum(r2a,axis=0)+1.0)).unsqueeze(1)
         w = torch.transpose(w.repeat(1,r2a.shape[0]),0,1)
@@ -255,35 +251,22 @@ class SE3Transformer(nn.Module):
 
         ## Finalize -- local path: per-node prediction
         # any way to combine w/ h_atm predictions??
+        idx = torch.transpose(idx['ligidx'],0,1)
         g = h_atm['0']
         g = torch.transpose(g,1,2)
         for layer in self.PAblock: g = layer(g)
+        g = torch.matmul(idx,g[:,:,0])
+        g = torch.transpose(g,0,1)
 
         ## new, global "weight" path
         w = h_atm['0']
         w = torch.transpose(w,1,2)
-        for layer in self.Wblock: w = layer(w)
-
-        batch_natms = G_bnd.batch_num_nodes()
-        hs = torch.zeros(len(batch_natms)).requires_grad_(True)
-        gs =  []
-        b = 0
-        for i,idx in enumerate(ligidx):
-            idx = torch.transpose(idx,0,1)
-            e = b+int(batch_natms[i])
-            g_i = g[b:e,:,:]
-            w_i = w[b:e,:,:]
-
-            g_i = torch.matmul(idx,g_i[:,:,0])
-            g_i = torch.transpose(g_i,0,1)
-
-            w_i = torch.matmul(idx,w_i[:,:,0])
-            w_i = torch.transpose(w_i,0,1)
-
-            h_i = torch.mean(w_i*g_i)
+        for layer in self.Wblock:
+            w = layer(w)
             
-            hs[i] = h_i
-            gs.append(g_i)
-            b = e
+        w = torch.matmul(idx,w[:,:,0])
+        w = torch.transpose(w,0,1)
+
+        h = torch.mean(w*g)
         
-        return torch.tensor(hs), gs
+        return h, g
