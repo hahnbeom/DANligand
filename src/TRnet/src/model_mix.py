@@ -13,13 +13,15 @@ class SE3TransformerWrapper(nn.Module):
     """SE(3) equivariant GCN with attention"""
     def __init__(self, num_layers_lig=2,
                  num_layers_rec=2,
+                 num_layers_denoise=0,
                  num_channels=32, num_degrees=3, n_heads=4, div=4,
-                 l0_in_features_lig=15,
-                 l0_in_features_rec=14,
+                 l0_in_features_lig=19,
+                 l0_in_features_rec=18,
                  l0_out_features=32,
                  l1_in_features=0,
                  l1_out_features=0, #???
                  K=4, # how many Y points
+                 nattn=1,
                  num_edge_features=5, #(bondtype-1hot x4, d) -- ligand only
                  dropout=0.1,
                  bias=True):
@@ -30,6 +32,7 @@ class SE3TransformerWrapper(nn.Module):
         self.l1_in_features = l1_in_features
         self.scale = 1.0 # num_head #1.0/np.sqrt(float(d))
         self.K = K
+        self.nattn = nattn
         
         fiber_in = Fiber({0: l0_in_features_lig}) if l1_in_features == 0 \
             else Fiber({0: l0_in_features_lig, 1: l1_in_features})
@@ -47,7 +50,7 @@ class SE3TransformerWrapper(nn.Module):
         
         fiber_in = Fiber({0: l0_in_features_rec}) if l1_in_features == 0 \
             else Fiber({0: l0_in_features_rec, 1: l1_in_features})
-        
+
         # processing receptor (==grids)
         self.se3_rec = SE3Transformer(
             num_layers   = num_layers_rec,
@@ -59,6 +62,20 @@ class SE3TransformerWrapper(nn.Module):
             fiber_edge=Fiber({0: 1}), #always just distance
         )
 
+        fiber_in = Fiber({0: l0_in_features_rec}) if l1_in_features == 0 \
+            else Fiber({0: l0_in_features_rec, 1: l1_in_features})
+
+        # denoise if necessary
+        self.se3_denoiser = SE3Transformer(
+            num_layers   = num_layers_denoise,
+            num_heads    = n_heads,
+            channels_div = div,
+            fiber_in=fiber_in,
+            fiber_hidden=Fiber({0: num_channels, 1:num_channels, 2:num_channels}),
+            fiber_out=Fiber({0: l0_in_features_rec}), #identical I/O
+            fiber_edge=Fiber({0: 1}),
+        )
+
         # cross-attention related
         self.phi = nn.Linear( d, d )
         self.W =  nn.Linear( d, d )
@@ -66,8 +83,22 @@ class SE3TransformerWrapper(nn.Module):
         #self.W = nn.ModuleList([])
         #for k in range(K):
         #    self.phi.append(nn.Linear( d, d )) # should this be per-K dependent?
+
+        self.Ascaler1 = nn.Parameter(torch.tensor(0.1))
+        self.Ascaler2 = nn.Parameter(torch.tensor(0.1))
         
-    def forward(self, Grec, Glig, labelidx):
+    def Xattention( self, h_r, h_l):
+        for i_layer in range(self.nattn):
+            dots = torch.einsum("id,kd->ki",h_r,h_l) # K x N
+             
+            A = nn.functional.softmax(self.scale*dots,dim=1)
+
+            h_r = h_r + self.Ascaler1*torch.einsum("ij,id->jd", A, h_l)
+            h_l = h_l + self.Ascaler2*torch.einsum("ij,jd->id", A, h_r)
+
+        return A
+        
+    def forward(self, Grec, Glig, labelidx, denoise=False):
 
         node_features_rec = {'0':Grec.ndata['attr'][:,:,None].float()}#,'1':Grec.ndata['x'].float()}
         edge_features_rec = {'0':Grec.edata['attr'][:,:,None].float()}
@@ -75,43 +106,58 @@ class SE3TransformerWrapper(nn.Module):
         node_features_lig = {'0':Glig.ndata['attr'][:,:,None].float()}#,'1':Glig.ndata['x'].float()}
         edge_features_lig = {'0':Glig.edata['attr'][:,:,None].float()}
 
-
         if self.l1_in_features > 0:
             node_features_rec['1'] = Grec.ndata['x'].float()
             node_features_lig['1'] = Glig.ndata['x'].float()
 
-        print(node_features_rec['0'].shape)
-        
+        # process if receptor data is real otherwise skip
+        if denoise:
+            node_features_rec = {'0':self.se3_denoiser(Grec, node_features_rec, edge_features_rec)['0']}
+            
         hs_rec = self.se3_rec(Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
-        hs_lig = self.se3_lig(Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1 
-
-        print(hs_rec)
-        print(hs_lig)
+        hs_lig = self.se3_lig(Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
 
         hs_rec = torch.squeeze(hs_rec) # N x d
         hs_lig = torch.squeeze(hs_lig) # M x d
 
-        print(hs_lig)
-        print(hs_rec)
-
-        #N = hs_rec.shape[0]
-        #M = hs_lig.shape[0]
-        #labelidx = torch.eye(M)[label] # K x M
- 
         xyz_rec = Grec.ndata['x'].squeeze().float()
 
-        hs_lig = nn.functional.relu( self.phi(hs_lig) ) # M x d
-        hs_lig = torch.matmul(labelidx,hs_lig) # K x d
+        size1 = Grec.batch_num_nodes()
+        size2 = Glig.batch_num_nodes()
+        
+        A_s = []
+        Yrec_s = []
+        asum,bsum=0,0
 
-        dots = torch.einsum("id,kd->ki",hs_rec,hs_lig) # K x N
-        A = nn.functional.softmax(self.scale*dots,dim=1) 
+        # caution: dimension can be smaller than should be if batch == 1
+        #if len(labelidx) == 1: labelidx = [labelidx.unsqueeze(0)
+                                           
+        for a,b,idx1hot in zip(size1,size2,labelidx):
+            h_r = hs_rec[asum:asum+a]
+            x = xyz_rec[asum:asum+a]
 
-        #print(torch.sum(A,dim=1))
+            # pick key-part only
+            h_l = hs_lig[bsum:bsum+b]
+            h_l = torch.matmul(idx1hot,h_l) # K x d
 
-        Yrec = torch.einsum("ki,il->kl",A,xyz_rec) # "Weighted sum":  K x N, N x 3 -> k x 3
+            ## attention part
+            #print(a, b, bsum, h_l.shape, idx1hot.shape)
+            h_l = nn.functional.relu( self.phi(h_l) ) # M x d
 
-        #for k in range(self.K):
-        #    imax = torch.argmax(A[k])
-        #    print(imax, xyz_rec[imax], A[k,imax])
+            A = self.Xattention( h_r, h_l )
+            
+            #dots = torch.einsum("id,kd->ki",h_r,h_l) # K x N
+            #A = nn.functional.softmax(self.scale*dots,dim=1)
 
-        return Yrec, A #K x 3
+            ## maybe add some more here to update h_r,h_l??
+
+            Yrec = torch.einsum("ki,il->kl",A,x) # "Weighted sum":  K x N, N x 3 -> k x 3
+            A_s.append(A)
+            Yrec_s.append(Yrec)
+            asum += a
+            bsum += b
+
+        Yrec_s = torch.stack(Yrec_s,dim=0)
+        #print(Yrec_s.shape)
+        return Yrec_s, A_s #B x ? x ?
+

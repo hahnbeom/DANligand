@@ -37,7 +37,8 @@ class Dataset(torch.utils.data.Dataset):
                  xyz_as_bb       = False, 
                  sample_mode     = 'random',
                  use_l1          = False,
-                 origin_as_node  = False
+                 origin_as_node  = False,
+                 inference       = False,
     ):
         self.proteins = targets
         
@@ -53,6 +54,7 @@ class Dataset(torch.utils.data.Dataset):
         self.edgemode = edgemode
         self.edgedist = edgedist
         self.edgek = edgek
+        self.inference = inference
         #self.dist_fn_atm = lambda x:get_dist_neighbors(x, mode=edgemode, top_k=edgek[1], dcut=edgedist[1])
         self.dist_fn_atm = get_dist_neighbors
         self.debug = debug
@@ -85,34 +87,43 @@ class Dataset(torch.utils.data.Dataset):
         # "proteins" in a format of "protein.idx"
         ip = int(index/self.nsamples_per_p) #==index
         
-        pname = self.proteins[ip].split('/')[-1].split('.')[0]
-        
-        if not os.path.exists(self.datadir+pname+'.lig.npz'):
+        pname = '.'.join(self.proteins[ip].split('/')[-1].split('.')[:-1])
+
+        fname = self.datadir+pname+'.lig.npz'
+        if not os.path.exists(fname):
              skip_this = True
              cats = []
         else:
-            samples = np.load(self.datadir+pname+'.lig.npz',allow_pickle=True) #motif type & crd only
-            if 'cat' not in samples or len(samples['cat']) == 0:
-                skip_this = True
+            samples = np.load(fname,allow_pickle=True) #motif type & crd only
+            if not self.inference:
+                if ('cat' not in samples or len(samples['cat']) == 0):
+                    skip_this = True
+                else:
+                    cats = samples['cat']
+                    pindices = np.arange(len(samples['name']))
+                    pindex = np.random.choice(pindices,p=self.upsample(cats))
             else:
-                cats = samples['cat']
-                pindices = np.arange(len(samples['name']))
-                pindex = np.random.choice(pindices,p=self.upsample(cats))
+                pindex = ip
 
         #print("load:", self.datadir+pname+'.lig.npz')
 
         #print(pname, os.path.exists(self.datadir+pname+'.lig.npz'), len(cats))
         if skip_this:
             info['pname'] = 'none'
-            print("failed to read input npz")
+            print("failed to read input npz %s"%fname)
             return False, info
 
         info['pindex'] = pindex
         info['pname'] = pname
         info['sname'] = samples['name'][pindex]
-        info['bases'] = samples['bases'][pindex]
 
+        # training-only labels
         rot_motif,motifidx = None,-1
+        info['bases'] = samples['bases'][pindex]
+        if 'rot' in samples: rot_motif   = samples['rot'][pindex] #quaternion"s" (n,4)
+        if 'bases' in samples: motif_y = samples['bases'][pindex][1] # functional group's connectivity
+        if 'cat' in samples: motifidx    = samples['cat'][pindex] #integer
+
         xyz_motif  = samples['xyz'][pindex] #vector; set motif position at the origin
         if self.xyz_as_bb:
             if 'xyz_bb' in samples:
@@ -121,10 +132,6 @@ class Dataset(torch.utils.data.Dataset):
                 sys.exit("xyz_bb requested but not exist in npz, failed!")
         else:
             xyz_pred   = xyz_motif
-
-        if 'rot' in samples: rot_motif   = samples['rot'][pindex] #quaternion"s" (n,4)
-        if 'bases' in samples: motif_y = samples['bases'][pindex][1] # functional group's connectivity
-        if 'cat' in samples: motifidx    = samples['cat'][pindex] #integer
 
         # receptor features that go into se3        
         prop = np.load(self.datadir+pname+".prop.npz")

@@ -1,7 +1,9 @@
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 
 def rmsd(Y,Yp): # Yp: require_grads
-    device = Y.get_device()
+    device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
     Y = Y - Y.mean(axis=0)
     Yp = Yp - Yp.mean(axis=0)
 
@@ -60,22 +62,70 @@ def generate_pose(Y, keyidx, xyzfull, atms=[], epoch=0, report=False):
     
 
 
-def report_attention(grids, A, epoch):
+def report_attention(grids, A, epoch, modelname):
+    K=A.shape[1]
+    print(A.shape)
+    print(K)
     form = "HETATM %5d %-3s UNK X %3d    %8.3f%8.3f%8.3f 1.00%6.2f\n"
     #ATOM      1  N   VAL A  33     -15.268  78.177  37.050  1.00 92.09      A    N
     #HETATM     0 O   UNK X   1       0.000   64.000  71.000 1.00  0.00
     for k in range(K):
-        out = open("attention%d.epoch%02d.pdb"%(k,epoch),'w')
+        out = open("pdbs/attention%d.epoch%02d.pdb"%(k,epoch),'w')
         out.write("MODEL %d\n"%epoch)
         for i,(x,p) in enumerate(zip(grids,A[k])):
+            # print("x:",x,'\n','p:',p)
             out.write(form%(i,"O",1,x[0],x[1],x[2],p))
         out.write("ENDMDL\n")
         out.close()
         
-    out = open("attentionAll.epoch%02d.pdb"%(epoch),'w')
-    #out.write("MODEL %d\n"%epoch)
+    out = open("pdbs//attentionAll.epoch%02d.pdb"%(epoch),'w')
+    out.write("MODEL %d\n"%epoch)
+
+    print(grids, '\n', A)
+    # print(max(A[:,i]))
     for i,x in enumerate(grids):
+        # print(i,x)
+        # print((i,"O",1,x[0],x[1],x[2],max(A[:,i])))
         out.write(form%(i,"O",1,x[0],x[1],x[2],max(A[:,i])))
-    #out.write("ENDMDL\n")
+    out.write("ENDMDL\n")
     out.close()
 
+def make_batch_vec(size_vec):
+    batch_vector = []
+    n=0
+    for i in size_vec:
+        for k in range(i):
+            batch_vector.append(n)
+        n+=1
+
+    return torch.tensor(batch_vector)
+
+
+def show_how_attn_moves(Z, epoch):
+
+    # Z = np.load(npyfile)
+    Z = Z[:int(len(Z)/2)]
+    nrows, ncols = Z.shape
+    X = np.linspace(1, ncols, ncols)
+    Y = np.linspace(1, nrows, nrows)
+    X,Y = np.meshgrid(X,Y)
+
+    fig = plt.figure(figsize =(14, 9))
+    ax = plt.axes(projection ='3d')
+    
+    # Creating plot
+    surf = ax.plot_surface(X, Y, Z , cmap='viridis')
+    ax.set_zticks([0, 0.0005, 0.05])
+
+    fig.colorbar(surf, shrink=0.6, aspect=8)
+
+    plt.tight_layout()
+    # plt.show()
+    plt.savefig('../plotpngs/epoch_%d.png'%epoch)
+
+    print('plotpngs/epoch_%d.png with %d points saved'%(epoch,int(len(Z))))
+
+
+
+# z = np.load('../fortest.npy')[4]
+# show_how_attn_moves(z, epoch=14)

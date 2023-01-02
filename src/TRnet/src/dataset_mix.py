@@ -4,58 +4,50 @@ import dgl
 import sys,copy
 from scipy.spatial.transform import Rotation
 import time
-import random
 
 ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "empty node"
 
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, targets, K, datapath='data', neighmode='dist',
-                 n=1, maxT=5.0, dcut_lig=5.0, pert=False, noiseP = 0.8):
+                 keyatmdef='data/keyatom.def.npz',
+                 batchsize=10,
+                 real_data_every_minibatch=2,
+                 n=1, maxT=5.0, dcut_lig=5.0, pert=False ):
         
-        self.targets = targets
         self.datapath = datapath
         self.neighmode = neighmode
-        self.n = n
+        self.keyatmdef = keyatmdef
+        self.batchsize = batchsize
+        self.real_data_every_minibatch = real_data_every_minibatch
         self.K = K
         self.dcut_lig = dcut_lig
         self.maxT = maxT
         self.pert = pert
         self.topk = 8
-        self.noiseP = noiseP
         
         self.Grecs = []
         self.Gligs = []
-        '''
-        for i,target in enumerate(targets):
-            motifnetnpz = self.datapath+'/'+target+'.score.npz'
-            Grec = receptor_graph_from_motifnet(motifnetnpz, K)
-            self.Grecs.append(Grec)
 
-            mol2 = self.datapath+'/'+target+'.ligand.mol2'
-            
-            Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig)
-            if not Glig:
-                print("failed to read %s"%target)
-                continue
-
-            
-            keyidx = identify_keyidx(target, Glig, atms, datapath)
-            if not keyidx:
-                print("%4d/%4d: key name violation %s"%(i,len(targets),target))
-                continue
-
-            keyidx = keyidx[:self.K]
-                
-            self.Gligs.append((Glig,keyidx))
-        '''
-            
+        self.targets_real = [a for a in targets if 'simulated' not in a]
+        self.targets_simul = [a for a in targets if 'simulated' in a]
             
     def __len__(self):
-        return self.n*len(self.targets)
+        return 1000 #len(self.targets_real+self.targets_simul)
     
     def __getitem__(self, index): #N: maximum nodes in batch
-        imol = index%len(self.targets)
-        target = self.targets[imol]
+        batchidx = int(index/self.batchsize)
+        #print(index,batchidx,batchidx%self.real_data_every_minibatch)
+
+        if batchidx%self.real_data_every_minibatch == 0:
+            targets = self.targets_real
+            datatype = 'real'
+        else:
+            targets = self.targets_simul
+            datatype = 'simulated'
+
+        # take random sample and not shuffle
+        imol = np.random.randint(len(targets))
+        target = targets[imol]
 
         motifnetnpz = self.datapath+'/'+target+'.score.npz'
         mol2 = self.datapath+'/'+target+'.ligand.mol2'
@@ -64,25 +56,19 @@ class DataSet(torch.utils.data.Dataset):
         try:
             Grec = receptor_graph_from_motifnet(motifnetnpz, self.K, mode=self.neighmode, top_k=self.topk)
             Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig,mode=self.neighmode,top_k=self.topk)
-
         except:
-            # print("failed to read %s"%target)
+            print("failed to read %s"%target)
             return 
-        
-        keyidx = identify_keyidx(target, Glig, atms, self.datapath, self.K)
+
+        # use shorter name from here on
+        target = target.split('/')[-1]
+        keyidx = identify_keyidx(target, Glig, atms, self.keyatmdef, self.K)
         if not keyidx:
             #print("%4d/%4d: key name violation %s"%(index,len(self.targets),target))
             return 
 
         keyidx = keyidx[:self.K]
         
-        '''
-        if target in ['bace1r']:
-            natmol2 = '%s/bace1.ligand.mol2'%self.datapath
-            Gnat,_ = ligand_graph_from_mol2(natmol2,self.K,dcut=self.dcut_lig)
-        else:
-            Gnat = Glig
-        '''
         Gnat = Glig
             
         # hard-coded
@@ -94,7 +80,6 @@ class DataSet(torch.utils.data.Dataset):
         labelxyz = xyzlig_nat[label] # K x 3
 
         if self.pert:
-    
             com = torch.mean(Glig.ndata['x'],axis=0)
             q = torch.rand(4) # random rotation
             R = torch.tensor(Rotation.from_quat(q).as_matrix()).float()
@@ -103,13 +88,7 @@ class DataSet(torch.utils.data.Dataset):
             xyz = torch.matmul(Glig.ndata['x']-com,R) + com + t
             Glig.ndata['x'] = xyz
 
-        info = {'name':target, 'atms':atms}
-
-        noise_or_not = random.random() < self.noiseP
-        
-        if noise_or_not:
-            Glig, randoms = give_noise_to_lig(Glig)
-
+        info = {'name':target, 'datatype':datatype }
 
         return Grec, Glig, labelxyz, keyidx, info #label
 
@@ -118,20 +97,17 @@ def receptor_graph_from_motifnet(npz,K,dcut=1.8,mode='dist',top_k=8,debug=False)
     grids = data['grids']
     prob = data['P']
 
-    # print(prob[1:])
-
     sel = []
-    criteria = np.array([0 for k in range(13)]) #uniform
-    # criteria = np.array([0.5,0.5,0.5,0.9,0.5,0.5,0.3,0.4,0.3,1.0,0.3,0.3,0.3]) #per-motif
+    #criteria = [0.25 for k in range(14)] #uniform
+    criteria = np.array([0.5,0.5,0.5,0.9,0.5,0.5,0.3,0.4,0.3,1.0,0.3,0.3,0.3]) #per-motif
     for i,p in enumerate(prob):
         #imax = np.argmax(p[1:])
         #if p[imax] > criteria[imax]: sel.append(i)
         diff = p[1:]-criteria
         if (diff>0.0).any(): sel.append(i)
             
-
     if debug:
-        print("%s, selected %d points from %d"%(npz, len(sel),len(grids)))
+        print("selected %d points from %d"%(len(sel),len(grids)))
     xyz = grids[sel]
     P_sel = prob[sel]
 
@@ -202,22 +178,14 @@ def read_mol2(mol2):
 
         words = l[:-1].split()
         if read_cont == 1:
-
             idx = words[0]
-            if words[1].startswith('BR'): words[1] = 'Br'
-            if words[1].startswith('Br') or  words[1].startswith('Cl') :
+            if words[1].startswith('Br') or  words[1].startswith('Cl'):
                 elem = words[1][:2]
             else:
                 elem = words[1][0]
-
-            if elem == 'A' or elem == 'B' :
-                elem = words[5].split('.')[0]
-            
-            
             
             if elem not in ELEMS:
-                # print('ERROR: %s, unknown elem type: %s'%(mol2,elem))
-                # print(words)
+                #print('ERROR: %s, unknown elem type: %s'%(mol2,elem))
                 #return False
                 elem = 'Null'
             
@@ -227,9 +195,8 @@ def read_mol2(mol2):
             xyzs.append([float(words[2]),float(words[3]),float(words[4])]) 
                 
         elif read_cont == 2:
-            # if words[3] == 'du' or 'un': print(mol2)
             bonds.append([int(words[1])-1,int(words[2])-1]) #make 0-index
-            bondtypes = {'1':1,'2':2,'3':3,'ar':3,'am':2, 'du':0, 'un':0}
+            bondtypes = {'1':1,'2':2,'3':3,'ar':3,'am':2}
             borders.append(bondtypes[words[3]])
 
     nneighs = [[0,0,0,0] for _ in qs]
@@ -342,7 +309,7 @@ def ligand_graph_from_mol2(mol2,K,dcut,mode='dist',top_k=8):
 
     return G,atms    
 
-def identify_keyidx(target, Glig, atms, datapath, K):
+def identify_keyidx(target, Glig, atms, keyatmdef, K):
     ## find key idx as below -- TODO
     # 1,2 2 max separated atoms along 1-st principal axis
     # 3:
@@ -350,32 +317,10 @@ def identify_keyidx(target, Glig, atms, datapath, K):
     ## temporary: hard-coded
     # perhaps revisit as 3~4 random fragment centers -- once fragmentization logic implemented
     
-    keyatoms = np.load(f'{datapath}/keyatom.def.npz',allow_pickle=True)
+    keyatoms = np.load(keyatmdef,allow_pickle=True)
     if 'keyatms' in keyatoms:
         keyatoms = keyatoms['keyatms'].item()
     keyidx = [atms.index(a) for a in keyatoms[target] if a in atms]
         
     if len(keyidx) < K: return False
-
     return keyidx
-
-def give_noise_to_lig(G_lig, random_in_lig = 0.1, noise_scale = 1):
-    xyz = G_lig.ndata['x']
-    xyz = xyz.squeeze()
-
-    at_num = xyz.shape[0]
-    rand_num = int(at_num*random_in_lig)
-
-    mask = torch.zeros_like(xyz)
-    randoms = random.choices([i for i in range(at_num)],k=rand_num)
-    random_scale = (torch.rand_like(mask)*2-1)*noise_scale
-
-    for i in randoms:
-        mask[int(i)] +=1
-
-    mask = random_scale*mask
-    xyz = xyz + mask
-
-    G_lig.ndata['x'] =xyz.float()[:,None,:]
-
-    return G_lig, randoms

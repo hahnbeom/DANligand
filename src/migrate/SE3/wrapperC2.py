@@ -21,6 +21,8 @@ class SE3TransformerWrapper(nn.Module):
         fiber_in = Fiber({0: l0_in_features}) if l1_in_features == 0 \
             else Fiber({0: l0_in_features, 1: l1_in_features})
 
+        #print(l1_in_features, l0_in_features, num_edge_features)
+        
         self.se3 = SE3Transformer(
             num_layers   = num_layers,
             num_heads    = 4,
@@ -79,6 +81,8 @@ class SE3TransformerWrapper(nn.Module):
         for key in node_features:
             node_in[key] = self.dropout(node_features[key])
         #edge_features = self.dropout(edge_features)
+
+        #print(node_in['0'].shape, edge_features['0'].shape)
         hs = self.se3(G, node_in, edge_features)
         
         # per-node weights for Orientation/Backbone/Category
