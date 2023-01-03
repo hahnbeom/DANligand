@@ -5,9 +5,7 @@ from torch.nn import Linear
 import sys
 import torch.nn as nn
 from torch.distributions import Categorical
-from torch_scatter import scatter_mean
-
-
+#from torch_scatter import scatter_mean
 
 class TriangleProteinToCompound_v2(torch.nn.Module):
     # separate left/right edges (block1/block2).

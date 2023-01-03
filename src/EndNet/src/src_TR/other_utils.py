@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
-from torch_scatter import scatter
 
 from typing import Optional, Tuple
 
 
 from torch import Tensor
-from torch_scatter import scatter_add
+#from torch_scatter import scatter
+#from torch_scatter import scatter_add
 
 def to_dense_batch(x: Tensor, batch: Optional[Tensor] = None,
                    fill_value: float = 0., max_num_nodes: Optional[int] = None,
@@ -45,8 +45,19 @@ def to_dense_batch(x: Tensor, batch: Optional[Tensor] = None,
     if batch_size is None:
         batch_size = int(batch.max()) + 1
 
-    num_nodes = scatter_add(batch.new_ones(x.size(0)), batch, dim=0,
-                            dim_size=batch_size)
+    #num_nodes = scatter_add(batch.new_ones(x.size(0)), batch, dim=0,
+    #                        dim_size=batch_size)
+    # torch_scatter.scatter_add: (src, index, dim=, out=, dim_size=)
+    # "add source value to the given index"
+    
+    
+    # torch.scatter_add: (input, dim, index, src)
+    # new_ones: new array all-1 with size
+
+    # default adds up to dim_size zero array
+    
+    num_nodes = x.new_zeros(x.size(0), dtype=torch.long)
+    num_nodes = torch.scatter_add(num_nodes, -1, batch, batch.new_ones(x.size(0)) )
     cum_nodes = torch.cat([batch.new_zeros(1), num_nodes.cumsum(dim=0)])
 
     if max_num_nodes is None:
@@ -89,7 +100,12 @@ def to_dense_adj(edge_index, batch=None, edge_attr=None, max_num_nodes=None):
 
     batch_size = batch.max().item() + 1
     one = batch.new_ones(batch.size(0))
-    num_nodes = scatter(one, batch, dim=0, dim_size=batch_size, reduce='add')
+    #num_nodes = scatter(one, batch, dim=0, dim_size=batch_size, reduce='add')
+
+    #torch.scatter: (input,dim,index,src)
+    num_nodes = batch.new_zeros(batch.size(0))
+    num_nodes = torch.scatter(num_nodes, -1, batch, one)
+    
     cum_nodes = torch.cat([batch.new_zeros(1), num_nodes.cumsum(dim=0)])
 
     idx0 = batch[edge_index[0]]

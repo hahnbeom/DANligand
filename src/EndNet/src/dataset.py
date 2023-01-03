@@ -82,8 +82,6 @@ class Dataset(torch.utils.data.Dataset):
         self.neighmode = neighmode
         self.topk = 8
 
-
-
         if upsample == None:
             self.upsample = sample_uniform
         else:
@@ -101,111 +99,40 @@ class Dataset(torch.utils.data.Dataset):
         info = {}
         
         skip_this = False
-        
-        # "proteins" in a format of "protein.idx"
+
+        # get pdb idx
         ip = int(index/self.nsamples_per_p) #==index
-        
         if self.labeled:
             pname = self.proteins[ip]
 
+        # 1. read grid info
         fname = self.datadir+'%s.grid.npz'%self.proteins[ip]
-
-        if not os.path.exists(fname): 
-            fname = self.datadir+'%s.lig.npz'%self.proteins[ip]
-
         if not os.path.exists(fname):
             print("no such file exists", fname)
             skip_this = True
             cats = []
         else:
             sample = np.load(fname,allow_pickle=True) #motif type & crd only
-                
+            grids  = sample['xyz'] #vector; set all possible motif positions for prediction
+            if self.labeled:
+                labels = sample['labels'] # ngrid x nmotif
+                mask  = np.sum(labels>0,axis=1) #0 or 1
+                info['labels']  = labels
+                info['mask']    = mask
+
+        ## 2. read ligand info
+        mol2 = self.datadir+pname+'.ligand.mol2' ####### should change directory info after running featurize_lig###3
+        Glig = False
+        if not os.path.exists(mol2):
+            print(f"{mol2} doesn't exist")
+            skip_this = True
+
         if skip_this:
             info['pname'] = 'none'
             print("failed to read input npz")
-            return False, info
+            return
 
-        grids  = sample['xyz'] #vector; set all possible motif positions for prediction
-        if self.labeled:
-            labels = sample['labels'] # ngrid x nmotif
-            mask  = np.sum(labels>0,axis=1) #0 or 1
-            info['labels']  = labels
-            info['mask']    = mask
-
-        mol2 = self.datadir+pname+'.ligand.mol2' ####### should change directory info after running featurize_lig###3
-        Glig = False
-
-        if not os.path.exists(mol2): print("mol2 doesn't exist") 
-
-        info['pname'] = pname
-
-        # receptor features that go into se3        
-        prop = np.load(self.datadir+pname+".prop.npz")
-        xyz         = prop['xyz_rec']
-        charges_rec = prop['charge_rec'] 
-        atypes_rec  = prop['atypes_rec'] #1-hot
-        anames      = prop['atmnames']
-        aas_rec     = prop['aas_rec'] #rec only
-
-        #mask self
-        iexcl = []
-
-        #iexcl = np.array(iexcl)
-        xyz[iexcl] += 1000.0
-
-        sasa_rec = prop['sasa_rec']
-       
-        # bond properties
-        bnds    = prop['bnds_rec']
-        atypes  = np.array([myutils.find_gentype2num(at) for at in atypes_rec]) # string to integers
-            
-        # randomize motif coordinate
-        '''
-        dxyz = np.zeros(3)
-        if self.randomize_lig > 1e-3:
-            dxyz = 2.0*self.randomize_lig*(0.5 - np.random.rand(3))
-        '''
-
-        ### grids with labels only
-        #ilabeled = np.where(np.sum(labels,axis=0)>0)
-        #grids = self.pick_interfacial_grids(xyz, grids, self.edgedist[0])
-        
-        grid_com = np.mean(grids,axis=0)
-        
-        # orient around grid center
-        xyz = xyz - grid_com
-        grids = grids - grid_com
-
-        # randomize the rest coordinate
-        if self.randomize > 1e-3:
-            randxyz = 2.0*self.randomize*(0.5 - np.random.rand(len(xyz),3))
-            xyz = xyz + randxyz
-
-        d2o = np.sqrt(np.sum(xyz*xyz,axis=1))
-
-        ## append "virtual" nodes at the grid points
-        ngrids = len(grids)
-        anames = np.concatenate([anames,['grid%04d'%i for i in range(ngrids)]])
-        aas_rec = np.concatenate([aas_rec, [0 for _ in grids]]) # unk
-        atypes = np.concatenate([atypes, [0 for _ in grids]]) #null
-        sasa_rec = np.concatenate([sasa_rec, [0.0 for _ in grids]]) # 
-        charges_rec = np.concatenate([charges_rec, [0.0 for _ in grids]])
-        d2o = np.concatenate([d2o, [0.0 for _ in grids]])
-        xyz = np.concatenate([xyz,grids])
-        
-        aas1hot = np.eye(myutils.N_AATYPE)[aas_rec]
-        atypes  = np.eye(max(myutils.gentype2num.values())+1)[atypes] # convert integer to 1-hot
-        sasa    = np.expand_dims(sasa_rec,axis=1)
-        charges = np.expand_dims(charges_rec,axis=1)
-        d2o = d2o[:,None]
-
-        #natm = xyz.shape[0]-grids.shape[0] # real atoms
-        
-        #try:
-        G_atm = self.make_atm_graphs(xyz, grids,
-                                     [aas1hot,atypes,sasa,charges,d2o],
-                                     bnds, anames, self.CBonly, self.use_l1)
-        
+        # process ligand graph
         try:
             Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig,mode=self.neighmode,top_k=self.topk)
         
@@ -213,85 +140,103 @@ class Dataset(torch.utils.data.Dataset):
             print("failed to read %s"%pname)
             return
 
-        keyidx = identify_keyidx(pname, Glig, atms, self.datadir[:-1], self.K)
-
-        
-    
-
+        # re-origin to ligand com
+        origin = torch.mean(Glig.ndata['x'],axis=0) # 1,3
+        Glig.ndata['x'] = Glig.ndata['x'] - origin
         Gnat = Glig
-            
-        # hard-coded
+        
+        #noise_or_not = random.random() < self.noiseP
+        #if noise_or_not:
+        #    Glig, randoms = give_noise_to_lig(Glig)
+
+        # assign ligand key atoms
+        keyidx = identify_keyidx(pname, Glig, atms, self.datadir[:-1], self.K)
+        
         keyidx_nat = keyidx
         xyzlig_nat = Gnat.ndata['x']
             
         #label = np.random.permutation(keyidx)[:self.K]
-        label = keyidx_nat[:self.K]
+        label = keyidx_nat[:self.K] # hard-coded to use first 4 whatever it is
         labelxyz = xyzlig_nat[label]
 
+        ## 3. read receptor info
+        prop = np.load(self.datadir+pname+".prop.npz")
+        xyz         = prop['xyz_rec']
+        charges_rec = prop['charge_rec'] 
+        atypes_rec  = prop['atypes_rec'] #1-hot
+        anames      = prop['atmnames']
+        aas_rec     = prop['aas_rec'] #rec only
+        sasa_rec    = prop['sasa_rec']
+        bnds    = prop['bnds_rec']
+        atypes  = np.array([myutils.find_gentype2num(at) for at in atypes_rec]) # string to integers
+            
+        # orient around ligand center
+        origin = origin.squeeze().numpy()
+        xyz = xyz - origin
+        grids = grids - origin
 
+        # debug
         if self.debug:
-            natm = len(xyz) - ngrids
-            for i,g in enumerate(xyz[natm:]):
-                g = g + grid_com
-                #print("%4d %8.3f %8.3f %8.3f"%(i+natm,g[0],g[1],g[2]))
-
-        #except:
-        #    G_atm  = self.make_atm_graphs(xyz, grids,
-        #                                  [aas1hot,atypes,sasa,charges],
-        #                                  bnds, anames, self.CBonly, self.use_l1)
-        #    print("graphgen fail")
-        #    return False, info
-       
-        # works up to 5layers
-
-        noise_or_not = random.random() < self.noiseP
+            out = open('%s.xyz'%pname,'w')
+            for x in xyz:
+                out.write("O %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
+            for x in grids:
+                out.write("N %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
+            for x in Glig.ndata['x'].squeeze():
+                out.write("C %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
+            out.close()
         
-        if noise_or_not:
-            Glig, randoms = give_noise_to_lig(Glig)
+        ## assert grids are around origin
 
+        # randomize the receptor coordinates
+        if self.randomize > 1e-3:
+            randxyz = 2.0*self.randomize*(0.5 - np.random.rand(len(xyz),3))
+            xyz = xyz + randxyz
 
+        ## 4. append grid info to receptor graph: grid points as "virtual" nodes
+        ngrids = len(grids)
+        anames = np.concatenate([anames,['grid%04d'%i for i in range(ngrids)]])
+        aas_rec = np.concatenate([aas_rec, [0 for _ in grids]]) # unk
+        atypes = np.concatenate([atypes, [0 for _ in grids]]) #null
+        sasa_rec = np.concatenate([sasa_rec, [0.0 for _ in grids]]) # 
+        charges_rec = np.concatenate([charges_rec, [0.0 for _ in grids]])
+        xyz = np.concatenate([xyz,grids])
+        
+        aas1hot = np.eye(myutils.N_AATYPE)[aas_rec]
+        atypes  = np.eye(max(myutils.gentype2num.values())+1)[atypes] # convert integer to 1-hot
+        sasa    = np.expand_dims(sasa_rec,axis=1)
+        charges = np.expand_dims(charges_rec,axis=1)
+
+        # Make receptor graph
+        G_atm = self.make_atm_graphs(xyz, grids,
+                                     [aas1hot,atypes,sasa,charges],
+                                     bnds, anames, self.CBonly, self.use_l1)
+            
         if isinstance(G_atm,int):
-            print(" - Skip this (name/grid/node): ", info["pname"], G_atm, "%.1f sec"%(t1-t0))
-            return False, info
+            print(" - Skip this (name/grid/node): ", pname, G_atm, "%.1f sec"%(t1-t0))
+            return
         elif self.labeled:
             if G_atm.number_of_nodes() > 5000 or G_atm.number_of_edges() > 50000:
                 t1 = time.time()
-                print(" - Skip this (name/grid/node/edge): ", info["pname"], grids.shape[0],
+                print(" - Skip this (name/grid/node/edge): ", pname, grids.shape[0],
                       G_atm.number_of_nodes(), G_atm.number_of_edges(), "%.1f sec"%(t1-t0))
-                return False, info
+                return
 
-        info['grids'] = grids+grid_com
-        info['com']   = grid_com # where the origin is set
-        info['numnode'] = G_atm.number_of_nodes()
-
-
+        
         # Remove self edges
-        # TODO: check
         G_atm = myutils.remove_self_edges(G_atm)
 
         t1 = time.time()
         if self.debug:
             print("ngrid/node/edge:", info['pname'], grids.shape[0], G_atm.number_of_nodes(), G_atm.number_of_edges(), t1-t0)
-            
-        return G_atm, Glig, labelxyz, keyidx, info 
 
-    def pick_interfacial_grids(self, xyz, grids, dcut):
-        kd      = scipy.spatial.cKDTree(grids)
-        indices = []
-        kd_ca   = scipy.spatial.cKDTree(xyz)
-        indices = np.concatenate(kd_ca.query_ball_tree(kd, dcut))
-        indices = np.array(np.unique(indices),dtype=np.int16)
+        # fill in info
+        info['pname'] = pname
+        info['grids'] = grids+origin
+        info['com']   = origin
+        info['numnode'] = G_atm.number_of_nodes()
         
-        #xyz = torch.tensor(xyz).float()
-        #grids = torch.tensor(grids).float()
-        #dX = torch.unsqueeze(xyz,1) - torch.unsqueeze(grids,0)
-        #D = torch.sqrt(torch.sum(dX**2,2) + 1.0e-6).unsqueeze(0)
-        #_,u,v = torch.where(D<dcut)
-
-        #v = torch.unique(v)
-        #print(v.shape)
-        #print("trimmed:", grids.shape, indices.shape)
-        return grids[indices]
+        return G_atm, Glig, labelxyz, keyidx, info 
 
     def report_xyz(self,outname, atypes, xyz, origin=[0,0,0]):
         out = open(outname,'w')
@@ -316,6 +261,90 @@ class Dataset(torch.utils.data.Dataset):
         
         return samples, pindex
 
+    def make_atm_graphs(self, xyz, grids, obt_fs, bnds, atmnames, CBonly=False, use_l1=False ):
+        # Do KD-ball neighbour search -- grabbing a <dist neighbor from gridpoints
+        t0 = time.time()
+        kd      = scipy.spatial.cKDTree(xyz)
+        indices = []
+        kd_ca   = scipy.spatial.cKDTree(grids)
+        indices = np.concatenate(kd_ca.query_ball_tree(kd, self.ball_radius))
+        nxyz0 = len(xyz)
+
+        idx_ord = list(np.array(np.unique(indices),dtype=np.int16)) #atom indices close to any grid points
+        if CBonly:
+            idx_ord = [i for i in idx_ord if atmnames[i] in ['N','CA','C','O','CB']]
+
+        if self.labeled and len(idx_ord) > 5000:
+            return len(idx_ord)
+
+        xyz     = xyz[idx_ord]
+        natm = xyz.shape[0]-grids.shape[0] # real atoms
+        
+        bnds_bin = np.zeros((len(xyz),len(xyz)))
+        newidx = {idx:i for i,idx in enumerate(idx_ord)}
+        
+        # new way -- just iter through bonds
+        for i,j in bnds:
+            if i not in newidx or j not in newidx: continue # excluded node by kd
+            k,l = newidx[i], newidx[j] 
+            bnds_bin[k,l] = bnds_bin[l,k] = 1
+        for i in range(len(xyz)): bnds_bin[i,i] = 1 #self
+        ub,vb = np.where(bnds_bin)
+
+        # Concatenate coord & centralize xyz to ca.
+        xyz = torch.tensor(xyz).float()
+
+        ## 2) Connect by distance
+        ## Graph connection: u,v are nedges & pairs to each other; i.e. (u[i],v[i]) are edges for every i
+        t1 = time.time()
+        u,v,dX = self.dist_fn_atm(xyz[None,], mode=self.edgemode, top_k=self.edgek[1],
+                                  dcut=self.edgedist[1])
+        t2 = time.time()
+
+        ## reduce edge connections
+        N = u.shape[0] # num edges
+        D = torch.sqrt(torch.sum(dX[0]*dX[0],dim=-1))
+
+        ## Edge index
+        # take if 1) real-X or 2) virtual-virtual but d < dcut
+        incl_e = [i for i in range(N) if (u[i] < natm or v[i] < natm) or D[u[i],v[i]] < self.edgedist[0]]
+
+        # for debug mode
+        n1 = len([i for i in range(N) if (u[i] < natm or v[i] < natm)])
+        n2 = len([i for i in range(N) if D[u[i],v[i]] < self.edgedist[0]])
+
+        # distance
+        w = torch.sqrt(torch.sum((xyz[v] - xyz[u])**2, axis=-1)+1e-6)[...,None]
+        
+        w1hot = distance_feature(self.distance_feat,w,0.5,5.0) # torch.tensor
+       
+        bnds_bin = torch.tensor(bnds_bin[v,u]).float() #replace first bin (0.0~0.5 Ang) to bond info
+        w1hot[:,0] = bnds_bin # chemical bond
+
+        grid_neighs = torch.tensor([float(i >= natm and j >= natm) for i,j in zip(u,v)]).float()
+        w1hot[:,1] = grid_neighs # whether u,v are grid neighbors -- always 0 if split
+
+        # concatenate all one-body-features
+        obt  = []
+        for i,f in enumerate(obt_fs):
+            if len(f) > 0: obt.append(f[idx_ord])
+        obt = np.concatenate(obt,axis=-1)
+
+        ## Construct graphs
+        # G_atm: graph for all atms
+        G_atm = dgl.graph((u,v))
+        G_atm.ndata['attr'] = torch.tensor(obt).float() 
+        G_atm.edata['attr'] = w1hot 
+        G_atm.edata['rel_pos'] = dX[:,u,v].float()[0]
+        G_atm.ndata['x'] = xyz[:,None,:] # not a feature, just info to TRnet
+
+        te = time.time()
+        if self.debug:
+            print("took %.1f/%.1f/%.1f sec for processing "%(t1-t0,t2-t1,te-t2),
+                  G_atm.number_of_nodes(), G_atm.number_of_edges() )
+        return G_atm
+
+#### unused
     def make_res_graph(self, xyz, center_xyz, obt_fs, repsatm_idx, rsds_in_Gatm):
         # repsatm_idx: 166 vs reps_idx: 100
 
@@ -361,116 +390,21 @@ class Dataset(torch.utils.data.Dataset):
         
         return G_res, r2amap
 
-    def make_atm_graphs(self, xyz, grids, obt_fs, bnds, atmnames, CBonly=False, use_l1=False ):
-        # Do KD-ball neighbour search -- grabbing a <dist neighbor from gridpoints
-        t0 = time.time()
-        kd      = scipy.spatial.cKDTree(xyz)
+    def pick_interfacial_grids(self, xyz, grids, dcut):
+        kd      = scipy.spatial.cKDTree(grids)
         indices = []
-        kd_ca   = scipy.spatial.cKDTree(grids)
-        indices = np.concatenate(kd_ca.query_ball_tree(kd, self.ball_radius))
-        nxyz0 = len(xyz)
-
-        idx_ord = list(np.array(np.unique(indices),dtype=np.int16)) #atom indices close to any grid points
-        if CBonly:
-            idx_ord = [i for i in idx_ord if atmnames[i] in ['N','CA','C','O','CB']]
-
-        if self.labeled and len(idx_ord) > 5000:
-            return len(idx_ord)
-
-        xyz     = xyz[idx_ord]
-        natm = xyz.shape[0]-grids.shape[0] # real atoms
+        kd_ca   = scipy.spatial.cKDTree(xyz)
+        indices = np.concatenate(kd_ca.query_ball_tree(kd, dcut))
+        indices = np.array(np.unique(indices),dtype=np.int16)
         
-        bnds_bin = np.zeros((len(xyz),len(xyz)))
-        newidx = {idx:i for i,idx in enumerate(idx_ord)}
-        
-        # Any "clearer" way? re-index for the picked atms by "idx_ord"
-        '''
-        excl = np.isin(np.arange(nxyz0),idx_ord) 
-        excl = np.where(excl==False)[0]
+        #xyz = torch.tensor(xyz).float()
+        #grids = torch.tensor(grids).float()
+        #dX = torch.unsqueeze(xyz,1) - torch.unsqueeze(grids,0)
+        #D = torch.sqrt(torch.sum(dX**2,2) + 1.0e-6).unsqueeze(0)
+        #_,u,v = torch.where(D<dcut)
 
-        isbnd = np.zeros((nxyz0,nxyz0),dtype=np.int32)
-        for i,j in bnds: isbnd[i,j] = 1
-        isbnd[:,excl] = isbnd[:,excl] = 0
-
-        ub,vb = np.where(isbnd==1)
-
-        for i,j in zip(ub,vb):
-        '''
-
-        # new way -- just iter through bonds
-        for i,j in bnds:
-            #k,l = idx_ord.index(i),idx_ord.index(j) #list.index very inefficient
-            if i not in newidx or j not in newidx: continue # excluded node by kd
-            k,l = newidx[i], newidx[j] 
-            bnds_bin[k,l] = bnds_bin[l,k] = 1
-        for i in range(len(xyz)): bnds_bin[i,i] = 1 #self
-        ub,vb = np.where(bnds_bin)
-
-        # Concatenate coord & centralize xyz to ca.
-        xyz = torch.tensor(xyz).float()
-
-        ## 2) Connect by distance
-        ## Graph connection: u,v are nedges & pairs to each other; i.e. (u[i],v[i]) are edges for every i
-        t1 = time.time()
-        u,v,dX = self.dist_fn_atm(xyz[None,], mode=self.edgemode, top_k=self.edgek[1],
-                                  dcut=self.edgedist[1])
-        t2 = time.time()
-
-        ## reduce edge connections
-        N = u.shape[0] # num edges
-        D = torch.sqrt(torch.sum(dX[0]*dX[0],dim=-1))
-
-        ## Edge index
-        # take if 1) real-X or 2) virtual-virtual but d < dcut
-        incl_e = [i for i in range(N) if (u[i] < natm or v[i] < natm) or D[u[i],v[i]] < self.edgedist[0]]
-        #excl_e = [(i,u[i],v[i]) for i in range(N) if not (u[i] < natm or v[i] < natm)]
-
-        # for debug mode
-        n1 = len([i for i in range(N) if (u[i] < natm or v[i] < natm)])
-        n2 = len([i for i in range(N) if D[u[i],v[i]] < self.edgedist[0]])
-
-        #u = u[incl_e]
-        #v = v[incl_e]
-        #excl_n = np.isin(np.arange(len(xyz)),np.concatenate([u,v],axis=-1))
-        
-        
-        # distance
-        w = torch.sqrt(torch.sum((xyz[v] - xyz[u])**2, axis=-1)+1e-6)[...,None]
-        
-        w1hot = distance_feature(self.distance_feat,w,0.5,5.0) # torch.tensor
-       
-        bnds_bin = torch.tensor(bnds_bin[v,u]).float() #replace first bin (0.0~0.5 Ang) to bond info
-        w1hot[:,0] = bnds_bin # chemical bond
-
-        grid_neighs = torch.tensor([float(i >= natm and j >= natm) for i,j in zip(u,v)]).float()
-        w1hot[:,1] = grid_neighs # whether u,v are grid neighbors -- always 0 if split
-
-        #for i,(a,b) in enumerate(zip(u,v)):
-        #    if a==251: print(int(a),int(b),float(w1hot[i,0]),int(w1hot[i,1]),xyz[a,:],xyz[b,:])
-                
-        # concatenate all one-body-features
-        obt  = []
-        for i,f in enumerate(obt_fs):
-            if len(f) > 0: obt.append(f[idx_ord])
-        obt = np.concatenate(obt,axis=-1)
-
-        ## Construct graphs
-        # G_atm: graph for all atms
-        G_atm = dgl.graph((u,v))
-        G_atm.ndata['attr'] = torch.tensor(obt).float() 
-        G_atm.edata['attr'] = w1hot #;  'd' previously
-        G_atm.edata['rel_pos'] = dX[:,u,v].float()[0]
-
-        #if use_l1:
-        G_atm.ndata['x'] = xyz[:,None,:] # not a feature, just info to TRnet
-        #G_atm.edata['d'] = xyz[v] - xyz[u] #neccesary?
-        #G_atm.edata['w'] = w1hot #neccesary? #unused
-
-        te = time.time()
-        if self.debug:
-            print("took %.1f/%.1f/%.1f sec for processing "%(t1-t0,t2-t1,te-t2),
-                  G_atm.number_of_nodes(), G_atm.number_of_edges() )
-        return G_atm
+        #v = torch.unique(v)
+        return grids[indices]
     
 # Given a list of coordinates X, gets top-k neighbours based on eucledian distance
 def get_dist_neighbors(X, mode="topk", top_k=16, dcut=4.5, eps=1E-6):
@@ -495,7 +429,6 @@ def get_dist_neighbors(X, mode="topk", top_k=16, dcut=4.5, eps=1E-6):
             uv = np.unique(uv,axis=0)
             u = [a for a,b in uv]
             v = [b for a,b in uv]
-            #print("nedge:",dcut,nprv,len(uD),len(u))
             
     elif mode == 'distT': #--default
         # need to exclude self?
@@ -529,16 +462,18 @@ def get_affinity_1hot(affinity,digits,soften=0.5):
 def collate(samples):
     #samples should be G,info
     
-    valid = [v[0] != None for v in samples]
-    # try:
+    valid = [v for v in samples if v != None]
+    valid = [v for v in valid if (v[0] != False and v[0] != None)]
+    if len(valid) == 0:
+        return 
+
     Grec = []
     Glig = []
     
     label = []
     labelxyz = []
     info = []
-    for s in samples:
-        if s == None: continue
+    for s in valid:
         Grec.append(s[0])
         Glig.append(s[1])
         labelxyz.append(s[2])
@@ -549,7 +484,6 @@ def collate(samples):
     label = torch.stack(label,dim=0).squeeze()
 
     # unsqueeze for the batch dim
-    #print(len(labelxyz.shape), len(label.shape))
     if len(labelxyz.shape) == 2: labelxyz = labelxyz[None,:,:]
     if len(label.shape) == 1: label = label[None,:]
 
@@ -563,13 +497,8 @@ def collate(samples):
     edge_feature = {"0": bG.edata["attr"][:,:,None].float()}
 
     # below contains l0 features only
-    #print(info)
 
     return dgl.batch(Grec), dgl.batch(Glig), labelxyz, label, info, len(samples), node_feature, edge_feature
-
-    # except:
-    #     print("failed collation")
-    #     return None, {}, {}, {},
 
 def distance_feature(mode,d,binsize=0.5,maxd=5.0):
     if mode == '1hot': 

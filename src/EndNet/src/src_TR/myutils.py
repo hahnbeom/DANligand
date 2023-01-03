@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 
 def rmsd(Y,Yp): # Yp: require_grads
     device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
