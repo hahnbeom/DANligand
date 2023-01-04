@@ -23,7 +23,7 @@ w_false = 1.0 #1.0/6.0 # 1.0/ngroups null contribution
 #w_false = 0.0
 
 model = SE3TransformerWrapper( num_layers=4,
-                               l0_in_features=65+N_AATYPE+3,
+                               l0_in_features=65+N_AATYPE+2,
                                num_edge_features=3, #1-hot bond type x 2, distance 
                                l0_out_features=32, #category only
                                #l1_out_features=n_l1out,
@@ -41,8 +41,8 @@ params_loader = {
 # default setup
 set_params = {
     # 'root_dir'     : "/home/hpark/data/HmapMine/features.forGridNet/",
-    'root_dir' : "/home/wldh3594/EndNet/data/GridNet.ligand/",
-    'ball_radius'  : 12.0,
+    'root_dir' : "/ml/motifnet/GridNet.ligand/",
+    'ball_radius'  : 8.0,
     'edgedist'     : (2.6,4.5), 
     'edgemode'     : 'dist',
     #"upsample"     : sample1,
@@ -127,7 +127,6 @@ def grouped_label(label):
                 for j in js: labelG[:,j] = a
 
     # normalize
-    #print(labelG.shape)
     norm = torch.sum(labelG, dim=1)[:,None].repeat(1,ntypes)+1.0e-6
     labelG = labelG / norm
     
@@ -149,7 +148,6 @@ def MaskedBCE(labels,preds,masks):
         ngrid = label.shape[0]
         labelG = grouped_label(label)
         
-        #print(label.shape, pred.shape, mask.shape)
         Q = pred[-ngrid:]
         
         a = -label*torch.log(Q+1.0e-6) #-PlogQ
@@ -193,9 +191,7 @@ def ContrastLoss(preds,masks):
         loss += psum
     return loss
 
-
-def custom_loss_MAE(prefix, Yrec, Ylig):
-    # print(Ylig)
+def structure_loss(Yrec, Ylig, prefix=""):
     dY = Yrec-Ylig
     loss = torch.sum(dY*dY,dim=1)
     
@@ -205,45 +201,57 @@ def custom_loss_MAE(prefix, Yrec, Ylig):
 
     return loss_sum, meanD
 
-
 start_epoch = epoch
 count = np.zeros(ntypes)
 for epoch in range(start_epoch, max_epochs):
     b_count,e_count=0,0
     temp_loss = {"total":[], "BCEc":[], "BCEg":[], "BCEr":[], "contrast":[], "reg":[]}
-    for i, (Grec, Glig, labelxyz, keyidx, info, b, node, edge) in enumerate(train_loader):
-        print('1', info[0]['pname'])
+    for i, args in enumerate(train_loader):
+        if args == None:
+            e_count += 1
+            continue
+        
+        (Grec, Glig, labelxyz, keyidx, info, b, node, edge) = args
         if Grec == None:
             e_count += 1
             continue
-        # Get prediction and target value
     
         t0 = time.time()
         
         labelidx = [torch.eye(n)[idx] for n,idx in zip(Glig.batch_num_nodes(),keyidx)]
-        
-        labelxyz = to_cuda(labelxyz, device)
+        labelxyz = to_cuda( labelxyz, device )
 
-        # print(Grec, Glig, labelxyz, label, info, b, node, edge)
-        Yrec_s, z, pred = model(to_cuda(Grec, device), to_cuda(node, device),  to_cuda(Glig, device), to_cuda(labelidx, device), to_cuda(edge, device))
+        # predicted structure, Attention, category-for-GridNet
+        Yrec_s, z, pred = model(to_cuda(Grec, device), to_cuda(node, device),
+                                to_cuda(Glig, device), to_cuda(labelidx, device), to_cuda(edge, device))
 
-        ## regularize pre-sigmoid value |x|<4
-        p_reg = torch.nn.functional.relu(torch.sum(pred*pred-25.0)) #safe enough?
+        if Yrec_s.shape[1] != 4: continue ##debug -- why?
 
+        ## 1. GridNet loss related -- TODO
         pred = torch.sigmoid(pred) # Then convert to sigmoid (0~1)
         preds = [pred] # assume batchsize=1
         t1 = time.time()
 
-        # labels/mask have different size & cannot be Tensored
-        # better way?
+        # labels/mask have different size & cannot be Tensored -- better way?
         labels   = [torch.tensor(v["labels"], dtype=torch.float32).to(device) for v in info]
         mask     = [torch.tensor(v["mask"], dtype=torch.float32).to(device) for v in info] # to float
         Gsize     = torch.tensor([v["numnode"] for v in info]).to(device)
         pnames   = [v["pname"] for v in info]
         grids     = [v["grids"] for v in info]
        
+        ## 2. Structure loss
+        loss_struct, mae = structure_loss( Yrec_s, labelxyz ) #both are Kx3 coordinates
+        
+        ## 3. Regularization Loss --  regularize pre-sigmoid value |x|<4
+        p_reg = torch.nn.functional.relu(torch.sum(pred*pred-25.0)) #safe enough?
+
+        loss = loss_struct #TODO
+        
         #header = [v["pname"]+" %8.3f"*3%tuple(v["xyz"].squeeze()) for v in info]
- 
+        print(info[0]['pname'], float(loss.cpu()))
+            
+        temp_loss["total"].append(loss.cpu().detach().numpy()) #store as per-sample loss
+        
         # Only update after certain number of accululations.
         if (b_count+1)%accum == 0:
             optimizer.step()
@@ -264,74 +272,71 @@ for epoch in range(start_epoch, max_epochs):
     # Empty the grad anyways
     optimizer.zero_grad()
     for k in train_loss:
-        train_loss[k].append(np.array(temp_loss[k]))
+        if k in temp_loss:
+            train_loss[k].append(np.array(temp_loss[k]))
 
     b_count=0
     temp_loss = {"total":[], "BCEc":[], "BCEg":[], "BCEr":[], "contrast":[], "reg":[]}
     with torch.no_grad(): # wihout tracking gradients
 
-        for k in range(1): #repeat multiple times for stability
-            for G, node, edge, info in valid_loader:
-                if G == None:
-                    continue
-                    
-                # Get prediction and target value
-                pred = model(to_cuda(G, device), to_cuda(node, device), to_cuda(edge, device))
-                pred = torch.sigmoid(pred) # Then convert to sigmoid (0~1)
-
-                preds = [pred] # assume batchsize=1
-                labels   = [torch.tensor(v["labels"], dtype=torch.float32).to(device) for v in info]
-                mask     = [torch.tensor(v["mask"], dtype=torch.float32).to(device) for v in info] # to float
-                Gsize     = torch.tensor([v["numnode"] for v in info]).to(device)
-                
-                grids     = [v["grids"] for v in info]
-                tags = [v["pname"] for v in info]
-
-                loss1c,loss1g,loss1r,bygrid = MaskedBCE(labels,preds,mask)
-                loss1r = w_false*loss1r
-                loss2 = ContrastLoss(preds,mask) # make overal prediction low as possible
+        for i, args in enumerate(train_loader):
+            if args == None:
+                e_count += 1
+                continue
         
-                loss = loss1c + loss1g + loss1r + w_contrast*loss2
+            (Grec, Glig, labelxyz, keyidx, info, b, node, edge) = args
+            if Grec == None:
+                continue
+                    
+            labelidx = [torch.eye(n)[idx] for n,idx in zip(Glig.batch_num_nodes(),keyidx)]
+            labelxyz = to_cuda( labelxyz, device )
 
-                for tag,p,g,m,l in zip(tags,pred,grids,mask,labels):
-                    m = np.array(m.cpu())
-                    imask = np.where(m>0.0)[0]
-                    l = np.array(l.cpu())
-                    ngrid = l.shape[0]
+            # predicted structure, Attention, category-for-GridNet
+            Yrec_s, z, pred = model(to_cuda(Grec, device), to_cuda(node, device),
+                                    to_cuda(Glig, device), to_cuda(labelidx, device), to_cuda(edge, device))
 
-                    p = np.array(p[-ngrid:].cpu())
-                    if set_params['debug']:
-                        np.savez("%s.prob.npz"%(tag), p=p, grids=g)
-                        try:
-                            for i in imask:
-                                print("%-10s %3d"%(tag,int(np.where(l[i]>0)[0])),
-                                      " %8.3f"*3%tuple(g[i]),
-                                      " %4.2f"*len(p[i,:10])%tuple(p[i,:10])," | ",
-                                      " %4.2f"*len(p[i,10:])%tuple(p[i,10:]))
-                                  
-                        except:
-                            print("pass")
+            if Yrec_s.shape[1] != 4: continue ##debug -- why?
 
-                #print(["%5.3f "%f for f in np.abs(ts-ps)])
-                temp_loss["total"].append(loss.cpu().detach().numpy()) #store as per-sample loss
-                temp_loss["BCEc"].append(loss1c.cpu().detach().numpy()) #store as per-sample loss 
-                temp_loss["BCEg"].append(loss1g.cpu().detach().numpy()) #store as per-sample loss 
-                temp_loss["BCEr"].append(loss1r.cpu().detach().numpy()) #store as per-sample loss 
-                temp_loss["contrast"].append(loss2.cpu().detach().numpy()) #store as per-sample loss
+            ## 1. GridNet loss related -- TODO
+            pred = torch.sigmoid(pred) # Then convert to sigmoid (0~1)
+            preds = [pred] # assume batchsize=1
+            t1 = time.time()
+
+            # labels/mask have different size & cannot be Tensored -- better way?
+            labels   = [torch.tensor(v["labels"], dtype=torch.float32).to(device) for v in info]
+            mask     = [torch.tensor(v["mask"], dtype=torch.float32).to(device) for v in info] # to float
+            Gsize     = torch.tensor([v["numnode"] for v in info]).to(device)
+            pnames   = [v["pname"] for v in info]
+            grids     = [v["grids"] for v in info]
+       
+            ## 2. Structure loss
+            loss_struct, mae = structure_loss( Yrec_s, labelxyz ) #both are Kx3 coordinates
+            
+            loss = loss_struct #TODO
+        
+            #header = [v["pname"]+" %8.3f"*3%tuple(v["xyz"].squeeze()) for v in info]
+            print(info[0]['pname'], float(loss.cpu()))
+
+            temp_loss["total"].append(loss.cpu().detach().numpy()) #store as per-sample loss
+            #temp_loss["BCEc"].append(loss1c.cpu().detach().numpy()) #store as per-sample loss 
+            #temp_loss["BCEg"].append(loss1g.cpu().detach().numpy()) #store as per-sample loss 
+            #temp_loss["BCEr"].append(loss1r.cpu().detach().numpy()) #store as per-sample loss 
+            #temp_loss["contrast"].append(loss2.cpu().detach().numpy()) #store as per-sample loss
                 
-                if (b_count+1)%accum == 0:
-                    # print("VALID Epoch(%s): [%2d/%2d], Batch: [%2d/%2d], loss: %.3f (%.3f/%.3f/%.3f/%.3f)"
-                    #       %(modelname, epoch, max_epochs, b_count, len(valid_loader),
-                    #         np.sum(temp_loss["total"][-1*accum:]),
-                    #         #np.sum(temp_loss["BCEc"][-1*accum:]),
-                    #         #np.sum(temp_loss["BCEg"][-1*accum:]),
-                    #         #np.sum(temp_loss["BCEr"][-1*accum:]),
-                    #         bygrid[0],bygrid[1],bygrid[2],
-                    #         np.sum(temp_loss["contrast"][-1*accum:])))
-                    b_count += 1
+            if (b_count+1)%accum == 0:
+                # print("VALID Epoch(%s): [%2d/%2d], Batch: [%2d/%2d], loss: %.3f (%.3f/%.3f/%.3f/%.3f)"
+                #       %(modelname, epoch, max_epochs, b_count, len(valid_loader),
+                #         np.sum(temp_loss["total"][-1*accum:]),
+                #         #np.sum(temp_loss["BCEc"][-1*accum:]),
+                #         #np.sum(temp_loss["BCEg"][-1*accum:]),
+                #         #np.sum(temp_loss["BCEr"][-1*accum:]),
+                #         bygrid[0],bygrid[1],bygrid[2],
+                #         np.sum(temp_loss["contrast"][-1*accum:])))
+                b_count += 1
                 
     for k in valid_loss:
-        valid_loss[k].append(np.array(temp_loss[k]))
+        if k in temp_loss:
+            valid_loss[k].append(np.array(temp_loss[k]))
 
     print("** SUMM, train/valid loss: %7.4f %7.4f"%((np.mean(train_loss['total'][-1]), np.mean(valid_loss['total'][-1]))))
     
