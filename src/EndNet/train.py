@@ -22,11 +22,13 @@ w_contrast = 0.2
 w_false = 1.0 #1.0/6.0 # 1.0/ngroups null contribution
 #w_false = 0.0
 
-model = SE3TransformerWrapper( num_layers=4,
+model = SE3TransformerWrapper( num_layers=1,
                                l0_in_features=65+N_AATYPE+2,
                                num_edge_features=3, #1-hot bond type x 2, distance 
                                l0_out_features=32, #category only
                                #l1_out_features=n_l1out,
+                               num_degrees=1,
+                               num_channels=16,
                                ntypes=ntypes)
 
 print("Nparams:", count_parameters(model))
@@ -43,7 +45,8 @@ set_params = {
     # 'root_dir'     : "/home/hpark/data/HmapMine/features.forGridNet/",
     'root_dir' : "/ml/motifnet/GridNet.ligand/",
     'ball_radius'  : 8.0,
-    'edgedist'     : (2.6,4.5), 
+    #'edgedist' : (2.6,4.5), # grid: 26 neighs
+    'edgedist' : (2.2,4.0), # grid: 18 neighs -- exclude cube-edges 
     'edgemode'     : 'dist',
     #"upsample"     : sample1,
     "randomize"    : 0.2, # Ang, pert the rest
@@ -52,14 +55,14 @@ set_params = {
     'debug'        : ('-debug' in sys.argv),
     }
 
-train_set = Dataset(np.load('data/GridNet.ligand/datalist.npy'), **set_params)
-# train_set = Dataset(np.load("data/train.npy")[:1], **set_params)
+#train_set = Dataset(np.load('data/GridNet.ligand/datalist.npy'), **set_params)
+train_set = Dataset(np.load("data/GridNet.ligand/trainlist.npy"), **set_params)
 train_loader = data.DataLoader(train_set,
                                worker_init_fn=lambda _: np.random.seed(),
                                **params_loader)
 
-valid_set = Dataset('data/GridNet.ligand/datalist.npy', **set_params)
-# valid_set = Dataset(np.load("data/valid.npy")[:1], **set_params)
+#valid_set = Dataset('data/GridNet.ligand/datalist.npy', **set_params)
+valid_set = Dataset(np.load("data/GridNet.ligand/validlist.npy")[:1], **set_params)
 valid_loader = data.DataLoader(valid_set,
                                worker_init_fn=lambda _: np.random.seed(),
                                **params_loader)

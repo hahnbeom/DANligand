@@ -151,6 +151,9 @@ class Dataset(torch.utils.data.Dataset):
 
         # assign ligand key atoms
         keyidx = identify_keyidx(pname, Glig, atms, self.datadir[:-1], self.K)
+        if not keyidx:
+            print("failed to find key atom for %s"%pname)
+            return 
         
         keyidx_nat = keyidx
         xyzlig_nat = Gnat.ndata['x']
