@@ -22,14 +22,16 @@ w_contrast = 0.2
 w_false = 1.0 #1.0/6.0 # 1.0/ngroups null contribution
 #w_false = 0.0
 
-model = SE3TransformerWrapper( num_layers=1,
+model = SE3TransformerWrapper( num_layers=4,
                                l0_in_features=65+N_AATYPE+2,
                                num_edge_features=3, #1-hot bond type x 2, distance 
                                l0_out_features=32, #category only
                                #l1_out_features=n_l1out,
                                num_degrees=1,
                                num_channels=16,
-                               ntypes=ntypes)
+                               ntypes=ntypes,
+                               n_trigonometry_module_stack=2,
+                               )
 
 print("Nparams:", count_parameters(model))
 

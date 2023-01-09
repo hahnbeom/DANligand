@@ -230,8 +230,6 @@ class Dataset(torch.utils.data.Dataset):
         G_atm = myutils.remove_self_edges(G_atm)
 
         t1 = time.time()
-        if self.debug:
-            print("ngrid/node/edge:", info['pname'], grids.shape[0], G_atm.number_of_nodes(), G_atm.number_of_edges(), t1-t0)
 
         # fill in info
         info['pname'] = pname
@@ -239,6 +237,8 @@ class Dataset(torch.utils.data.Dataset):
         info['com']   = origin
         info['numnode'] = G_atm.number_of_nodes()
         
+        if self.debug:
+            print("ngrid/node/edge:", info['pname'], grids.shape[0], G_atm.number_of_nodes(), G_atm.number_of_edges(), t1-t0)
         return G_atm, Glig, labelxyz, keyidx, info 
 
     def report_xyz(self,outname, atypes, xyz, origin=[0,0,0]):
