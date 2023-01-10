@@ -299,26 +299,34 @@ class Dataset(torch.utils.data.Dataset):
 
         ## 2) Connect by distance
         ## Graph connection: u,v are nedges & pairs to each other; i.e. (u[i],v[i]) are edges for every i
-        t1 = time.time()
         u,v,dX = self.dist_fn_atm(xyz[None,], mode=self.edgemode, top_k=self.edgek[1],
                                   dcut=self.edgedist[1])
+
+        
+        # reselect edges between grids
+        D = torch.sqrt(torch.sum(dX[0]*dX[0],dim=-1))
+        
+        t1 = time.time()
+
+        ## Edge index for grid-grid
+        N = u.shape[0] # num edges
+        incl_e = np.zeros(N,dtype=np.int16)+1
+        for i,(a,b) in enumerate(zip(u,v)):
+            if a < natm or b < natm: continue
+            if D[a,b] > self.edgedist[0]:
+                incl_e[i] = -1
+                
+        ii = np.where(incl_e>=0)
+        u = u[ii]
+        v = v[ii]
+
         t2 = time.time()
 
         ## reduce edge connections
         N = u.shape[0] # num edges
-        D = torch.sqrt(torch.sum(dX[0]*dX[0],dim=-1))
-
-        ## Edge index
-        # take if 1) real-X or 2) virtual-virtual but d < dcut
-        incl_e = [i for i in range(N) if (u[i] < natm or v[i] < natm) or D[u[i],v[i]] < self.edgedist[0]]
-
-        # for debug mode
-        n1 = len([i for i in range(N) if (u[i] < natm or v[i] < natm)])
-        n2 = len([i for i in range(N) if D[u[i],v[i]] < self.edgedist[0]])
 
         # distance
         w = torch.sqrt(torch.sum((xyz[v] - xyz[u])**2, axis=-1)+1e-6)[...,None]
-        
         w1hot = distance_feature(self.distance_feat,w,0.5,5.0) # torch.tensor
        
         bnds_bin = torch.tensor(bnds_bin[v,u]).float() #replace first bin (0.0~0.5 Ang) to bond info
@@ -343,8 +351,10 @@ class Dataset(torch.utils.data.Dataset):
 
         te = time.time()
         if self.debug:
+            n1 = len([i for i in range(N) if (u[i] < natm or v[i] < natm)])
+            n2 = len([i for i in range(N) if (u[i] >= natm and v[i] >= natm)])
             print("took %.1f/%.1f/%.1f sec for processing "%(t1-t0,t2-t1,te-t2),
-                  G_atm.number_of_nodes(), G_atm.number_of_edges() )
+                  G_atm.number_of_nodes(), G_atm.number_of_edges(), n1, n2 )
         return G_atm
 
 #### unused
