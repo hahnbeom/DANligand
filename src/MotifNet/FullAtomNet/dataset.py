@@ -89,6 +89,7 @@ class Dataset(torch.utils.data.Dataset):
         
         pname = '.'.join(self.proteins[ip].split('/')[-1].split('.')[:-1])
 
+        print(self.datadir,self.proteins[ip])
         fname = self.datadir+pname+'.lig.npz'
         if not os.path.exists(fname):
              skip_this = True
@@ -118,10 +119,12 @@ class Dataset(torch.utils.data.Dataset):
         info['sname'] = samples['name'][pindex]
 
         # training-only labels
-        rot_motif,motifidx = None,-1
-        info['bases'] = samples['bases'][pindex]
+        rot_motif,motifidx,motif_y = None,-1,np.zeros(3)
+        if 'bases' in samples:
+            info['bases'] = samples['bases'][pindex]
+            motif_y = samples['bases'][pindex][1] # functional group's connectivity
+            
         if 'rot' in samples: rot_motif   = samples['rot'][pindex] #quaternion"s" (n,4)
-        if 'bases' in samples: motif_y = samples['bases'][pindex][1] # functional group's connectivity
         if 'cat' in samples: motifidx    = samples['cat'][pindex] #integer
 
         xyz_motif  = samples['xyz'][pindex] #vector; set motif position at the origin
@@ -129,7 +132,8 @@ class Dataset(torch.utils.data.Dataset):
             if 'xyz_bb' in samples:
                 xyz_pred   = samples['xyz_bb'][pindex][1] #vector
             else:
-                sys.exit("xyz_bb requested but not exist in npz, failed!")
+                #sys.exit("xyz_bb requested but not exist in npz, failed!")
+                xyz_pred = xyz_motif
         else:
             xyz_pred   = xyz_motif
 
@@ -442,9 +446,11 @@ def collate_old(samples):
             binfo['sname'].append(info[k]['sname'])
             binfo['pname'].append(info[k]['pname'])
             binfo['motifidx'].append(info[k]['motifidx'])
-            binfo['dxyz'].append(info[k]['dxyz'])
-            binfo['rot'].append(info[k]['rot'])
-            binfo['bases'].append(info[k]['bases'])
+
+            if 'dxyz' in info[k]:
+                binfo['dxyz'].append(info[k]['dxyz'])
+                binfo['rot'].append(info[k]['rot'])
+                binfo['bases'].append(info[k]['bases'])
             
             ligidx[k,shift] = 1.0
             shift += batch_natms[k]
