@@ -339,8 +339,8 @@ if __name__ == "__main__":
         npzs = [l[:-1] for l in open(sys.argv[1])]
         if not npzs[0].endswith('.npz'):
             sys.exit("input file should either end with '.npz' or contain a list of '.npz' files")
-        
+
     for npz in npzs:
         trgs = [npz.replace('.lig.npz','')+'.'+a  for a in np.load(npz,allow_pickle=True)['name']]
         print("Running ",npz,len(trgs))
-        main(trgs, npzout=True)
+        main(trgs, npzout=True)            
