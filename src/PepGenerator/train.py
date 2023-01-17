@@ -11,7 +11,8 @@ BATCH_SIZE = 1
 T = 10
 device = "cuda" if torch.cuda.is_available() else "cpu"
 MAXEPOCHS = 100
-LR = 5.0e-5
+LR = 1.0e-5
+W_REG = 0.0001
 
 set_params = {'datapath':'/ml/pepbdb/setH/'
               }#use default
@@ -40,7 +41,7 @@ def distance_loss(xyz):
     return loss
 
 def run_an_epoch(loader,model,optimizer,epoch,train):
-    temp_loss = {'total':[]}
+    temp_loss = {'total':[],'loss1':[],'loss2':[]}
     
     for i, (G, info) in enumerate(loader):
         if train: optimizer.zero_grad()
@@ -50,21 +51,20 @@ def run_an_epoch(loader,model,optimizer,epoch,train):
         dXpred = model(G)
         dX = info['xyz_lig'].to(device)
         pepidx = info['pepidx'] #.to(device)
-        loss = torch.tensor(0.0).to(device)
+        loss1 = torch.tensor(0.0).to(device)
+        loss2 = torch.tensor(0.0).to(device)
 
         # iter through batch dim
         for a,p,idx in zip(dX,dXpred,pepidx):
-            loss1 = F.mse_loss( a, p[idx,:] )
-            loss2 = 0.0*distance_loss(p[idx,:])
-            loss = loss + loss1 + loss2
-            '''
+            loss1 += F.mse_loss( a, p[idx,:] )
+            loss2 += W_REG*distance_loss(p[idx,:])
             form = "%3d %8.3f %8.3f %8.3f : %8.3f %8.3f %8.3f, loss %8.5f %8.5f"
             for i in range(len(a)):
                 print(form%(i,a[i,0],a[i,1],a[i,2],
                             p[idx,:][i,0],p[idx,:][i,1],p[idx,:][i,2],
                             float(loss1),float(loss2)))
-            '''
         
+        loss = loss1 + loss2
         if train:
             loss.backward()
             optimizer.step()
@@ -73,16 +73,19 @@ def run_an_epoch(loader,model,optimizer,epoch,train):
             print(f"VALID Epoch {epoch} | Loss: {loss.item()} ")
 
         temp_loss["total"].append(loss.cpu().detach().numpy()) #store as per-sample loss
+        temp_loss["loss1"].append(loss1.cpu().detach().numpy()) #store as per-sample loss
+        temp_loss["loss2"].append(loss2.cpu().detach().numpy()) #store as per-sample loss
     return temp_loss
                 
 def load_model(modelname):
     model = SE3TransformerAutoEncoder( **model_params )
     print("Num params: ", sum(p.numel() for p in model.parameters()))
     
-    train_loss = {'total':[]}
-    valid_loss = {'total':[]}
+    train_loss = {'total':[],'loss1':[],'loss2':[]}
+    valid_loss = {'total':[],'loss1':[],'loss2':[]}
     epoch = 0
 
+    model.to(device)
     optimizer   = torch.optim.AdamW(model.parameters(), lr=LR)
     
     if os.path.exists("models/%s/model.pkl"%modelname): 
@@ -100,7 +103,6 @@ def load_model(modelname):
             print("Creating a new dir at models/%s"%modelname) 
             os.mkdir("models/"+modelname)
                     
-    model.to(device)
     return model, optimizer, epoch, train_loss, valid_loss
 
 def main():    
@@ -109,7 +111,7 @@ def main():
                                    worker_init_fn=lambda _: np.random.seed(),
                                    **loader_params)
 
-    valid_set = DataSet(np.load("data/validlist.H.npy")[:10], **set_params)
+    valid_set = DataSet(np.load("data/validlist.H.npy")[:100], **set_params)
     valid_loader = data.DataLoader(valid_set,
                                    worker_init_fn=lambda _: np.random.seed(),
                                    **loader_params)
@@ -119,11 +121,13 @@ def main():
 
     for epoch in range(start_epoch,MAXEPOCHS):
         temp_loss = run_an_epoch(train_loader, model, optimizer, epoch, True)
-        train_loss['total'].append(temp_loss['total'])
+        for key in temp_loss:
+            train_loss[key].append(temp_loss[key])
 
         with torch.no_grad():
             temp_loss = run_an_epoch(valid_loader, model, optimizer, epoch, False)
-            valid_loss['total'].append(temp_loss['total'])
+            for key in temp_loss:
+                valid_loss[key].append(temp_loss[key])
             
         print("Epoch %d, train/valid loss: %7.4f %7.4f"%((epoch,
                                                           np.mean(train_loss['total'][-1]),
