@@ -210,7 +210,10 @@ def main(pdb,outprefix,
     elif gridoption == 'global':
         xyz = [np.array(list(xyz[rc].values()),dtype=np.float32) for rc in reschains if rc not in maskres]
         xyz = np.concatenate(xyz)
+<<<<<<< HEAD
         #print(xyz.shape)
+=======
+>>>>>>> 4588e9dd94bf0405ebc85b32a0397db84b3106b6
         with open(outprefix+'.grid.pdb','w') as gridout:
             grids = grid_from_xyz(xyz,xyz,gridsize,option=gridoption,gridout=gridout)
         out.write("Found %d grid points around ligand\n"%(len(grids)))
