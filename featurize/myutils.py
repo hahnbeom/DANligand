@@ -256,7 +256,7 @@ def fa2gentype(fats):
     return gents
 
 def defaultparams(aa,
-                  datapath='/applic/Rosetta/database/chemical/residue_type_sets/fa_standard/residue_types',
+                  datapath='/applic/rosetta/current/database/chemical/residue_type_sets/fa_standard/residue_types',
                   extrapath=''):
     # first search through Rosetta database
     p = None

@@ -25,7 +25,7 @@ class SE3TransformerWrapper(nn.Module):
                  K=4, # how many Y points
                  embedding_channels=32,
                  c=128,
-                 n_trigonometry_module_stack = 5,
+                 n_trigonometry_module_stack =5,
                  num_edge_features=5, #(bondtype-1hot x4, d) -- ligand only
                  dropout=0.1,
                  bias=True):
