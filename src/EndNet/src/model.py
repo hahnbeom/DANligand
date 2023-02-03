@@ -18,7 +18,7 @@ class SE3TransformerWrapper(nn.Module):
                  l1_in_features=0, l1_out_features=8,
                  num_edge_features=32, ntypes=15,
                  drop_out=0.1,
-                 n_trigonometry_module_stack=5,
+                 n_trigonometry_module_stack=2,
                  bias=True):
         super().__init__()
 
@@ -41,7 +41,7 @@ class SE3TransformerWrapper(nn.Module):
                               l1_out_features=0, #???
                               K=4, # how many Y points
                               embedding_channels=32,
-                              c=128,
+                              c=64,
                               n_trigonometry_module_stack = n_trigonometry_module_stack,
                               num_edge_features=5, #(bondtype-1hot x4, d) -- ligand only
                               dropout=0.1,

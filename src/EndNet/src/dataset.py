@@ -15,6 +15,10 @@ from src.src_Grid import myutils
 from src.src_Grid import motif
 from src.src_TR.dataset import ligand_graph_from_mol2, identify_keyidx, give_noise_to_lig
 
+## histogram of grids
+#import matplotlib.pyplot as plt
+grids_total=[]
+iteration=1
 
 class Dataset(torch.utils.data.Dataset):
     'Characterizes a dataset for PyTorch'
@@ -43,6 +47,7 @@ class Dataset(torch.utils.data.Dataset):
                  use_l1          = False,
                  origin_as_node  = False,
                  labeled         = True,
+                 ntype           = len(motif.MOTIFS),
                  K=4,
                  noiseP=0.8,
                  dcut_lig=5.0,
@@ -51,6 +56,7 @@ class Dataset(torch.utils.data.Dataset):
         self.proteins = targets
 
         self.labeled = labeled
+        self.ntype = ntype
         self.datadir = root_dir
         self.verbose = verbose
         self.ball_radius = ball_radius
@@ -116,6 +122,11 @@ class Dataset(torch.utils.data.Dataset):
             grids  = sample['xyz'] #vector; set all possible motif positions for prediction
             if self.labeled:
                 labels = sample['labels'] # ngrid x nmotif
+
+                # squeeze
+                if labels.shape[1] > self.ntype:
+                    labels = labels[:,:self.ntype]
+                
                 mask  = np.sum(labels>0,axis=1) #0 or 1
                 info['labels']  = labels
                 info['mask']    = mask
@@ -179,15 +190,15 @@ class Dataset(torch.utils.data.Dataset):
         grids = grids - origin
 
         # debug
-        if self.debug:
-            out = open('%s.xyz'%pname,'w')
-            for x in xyz:
-                out.write("O %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
-            for x in grids:
-                out.write("N %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
-            for x in Glig.ndata['x'].squeeze():
-                out.write("C %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
-            out.close()
+#        if self.debug:
+#           out = open('%s.xyz'%pname,'w')
+#           ifor x in xyz:
+#               out.write("O %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
+#           for x in grids:
+#               out.write("N %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
+#           for x in Glig.ndata['x'].squeeze():
+#               out.write("C %8.3f %8.3f %8.3f\n"%(x[0],x[1],x[2]))
+#           out.close()
         
         ## assert grids are around origin
 
@@ -195,7 +206,7 @@ class Dataset(torch.utils.data.Dataset):
         if self.randomize > 1e-3:
             randxyz = 2.0*self.randomize*(0.5 - np.random.rand(len(xyz),3))
             xyz = xyz + randxyz
-
+        
         ## 4. append grid info to receptor graph: grid points as "virtual" nodes
         ngrids = len(grids)
         anames = np.concatenate([anames,['grid%04d'%i for i in range(ngrids)]])
@@ -204,15 +215,17 @@ class Dataset(torch.utils.data.Dataset):
         sasa_rec = np.concatenate([sasa_rec, [0.0 for _ in grids]]) # 
         charges_rec = np.concatenate([charges_rec, [0.0 for _ in grids]])
         xyz = np.concatenate([xyz,grids])
+        d2o = np.sqrt(np.sum(xyz*xyz,axis=1))
         
         aas1hot = np.eye(myutils.N_AATYPE)[aas_rec]
         atypes  = np.eye(max(myutils.gentype2num.values())+1)[atypes] # convert integer to 1-hot
         sasa    = np.expand_dims(sasa_rec,axis=1)
         charges = np.expand_dims(charges_rec,axis=1)
-
+        d2o = d2o[:,None]
+        
         # Make receptor graph
         G_atm = self.make_atm_graphs(xyz, grids,
-                                     [aas1hot,atypes,sasa,charges],
+                                     [aas1hot,atypes,sasa,charges,d2o],
                                      bnds, anames, self.CBonly, self.use_l1)
             
         if isinstance(G_atm,int):
@@ -238,7 +251,12 @@ class Dataset(torch.utils.data.Dataset):
         info['numnode'] = G_atm.number_of_nodes()
         
         if self.debug:
-            print("ngrid/node/edge:", info['pname'], grids.shape[0], G_atm.number_of_nodes(), G_atm.number_of_edges(), t1-t0)
+            grids_total.append(G_atm.number_of_nodes())
+            print("==================================================================================================")
+            print(len(grids_total))
+            print()
+            print(grids_total)
+            print()
         return G_atm, Glig, labelxyz, keyidx, info 
 
     def report_xyz(self,outname, atypes, xyz, origin=[0,0,0]):
@@ -350,11 +368,11 @@ class Dataset(torch.utils.data.Dataset):
         G_atm.ndata['x'] = xyz[:,None,:] # not a feature, just info to TRnet
 
         te = time.time()
-        if self.debug:
-            n1 = len([i for i in range(N) if (u[i] < natm or v[i] < natm)])
-            n2 = len([i for i in range(N) if (u[i] >= natm and v[i] >= natm)])
-            print("took %.1f/%.1f/%.1f sec for processing "%(t1-t0,t2-t1,te-t2),
-                  G_atm.number_of_nodes(), G_atm.number_of_edges(), n1, n2 )
+#       if self.debug:
+#           n1 = len([i for i in range(N) if (u[i] < natm or v[i] < natm)])
+#           n2 = len([i for i in range(N) if (u[i] >= natm and v[i] >= natm)])
+#            print("took %.1f/%.1f/%.1f sec for processing "%(t1-t0,t2-t1,te-t2),
+#                 G_atm.number_of_nodes(), G_atm.number_of_edges(), n1, n2 )
         return G_atm
 
 #### unused
@@ -556,4 +574,4 @@ def load_dataset(set_params, generator_params, setsuffix):
 
     
     return train_generator,valid_generator
-    
+
