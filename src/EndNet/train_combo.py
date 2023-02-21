@@ -15,7 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 #from src import *
 from src.model import SE3TransformerWrapper
 from src.src_Grid.myutils import N_AATYPE, count_parameters, to_cuda
-from src.dataset import collate, Dataset
+from src.dataset_combo import collate, Dataset
 import src.src_Grid.motif as motif
 
 ntypes = 6 #simplified types #len(motif.MOTIFS)
@@ -32,17 +32,17 @@ wGrid = 1.0
 w_reg = 1e-10
 LR = 1.0e-4
 BATCH = 1
-w_contrast = 0.2
-w_false = 1.0 #1.0/6.0 # 1.0/ngroups null contribution
+w_contrast = 2.0 # divided by ngrid
+w_false = 0.2 #1.0/6.0 # 1.0/ngroups null contribution
 #w_false = 0.0
 
 # default setup
 set_params={
 # 'root_dir'     : "/home/hpark/data/HmapMine/features.forGridNet/",
-'root_dir' : "/ml/motifnet/GridNet.ligand/",
+'root_dir' : "/home/hpark/data/",
 'ball_radius'  : 8.0,
 #'edgedist' : (2.6,4.5), # grid: 26 neighs
-'edgedist' : (2.0,4.5), # grid: 18 neighs -- exclude cube-edges
+'edgedist' : (2.6,4.5), # grid: 18 neighs -- exclude cube-edges
 'edgemode'     : 'dist',
 #"upsample"     : sample1,
 "randomize"    : 0.2, # Ang, pert the rest
@@ -72,7 +72,9 @@ rank=0
 def load_params(rank):
     device=torch.device("cuda:%d"%rank if (torch.cuda.is_available()) else "cpu")
     ## model
-    model=SE3TransformerWrapper(num_layers=4,
+    model=SE3TransformerWrapper(num_layers_motif=2,
+                                num_layers_lig=2,
+                                num_layers_rec=1,
                                 l0_in_features=65+N_AATYPE+3,
                                 num_edge_features=3, #1-hot bond type x 2, distance 
                                 l0_out_features=32, #category only
@@ -80,7 +82,7 @@ def load_params(rank):
                                 num_degrees=1,
                                 num_channels=16,
                                 ntypes=ntypes,
-                                n_trigonometry_module_stack=2)
+                                n_trigonometry_module_stack=1)
     model.to(device)
     print("Nparams:",count_parameters(model))
 
@@ -160,11 +162,11 @@ def train_model(rank,world_size,dumm):
     ddp_model=DDP(model,device_ids=[gpu],find_unused_parameters=False)
 
     ## data loader
-    train_set = Dataset(np.load("data/GridNet.ligand/trainlist.npy"), **set_params)
+    train_set = Dataset(np.load("data/trainlist.combo.npy"), **set_params)
     train_sampler=data.distributed.DistributedSampler(train_set,num_replicas=world_size,rank=rank)
     train_loader=data.DataLoader(train_set,sampler=train_sampler,**params_loader)
 
-    valid_set=Dataset(np.load("data/GridNet.ligand/validlist.npy"),**set_params)
+    valid_set=Dataset(np.load("data/validlist.combo.npy"),**set_params)
     valid_sampler=data.distributed.DistributedSampler(valid_set,num_replicas=world_size,rank=rank)
     valid_loader=data.DataLoader(valid_set,sampler=valid_sampler,**params_loader)
 
@@ -223,19 +225,25 @@ def train_one_epoch(ddp_model,optimizer,loader,rank,epoch,is_train):
         with torch.cuda.amp.autocast(enabled=False):
             with ddp_model.no_sync():
                 t0 = time.time()
-                labelidx = [torch.eye(n)[idx] for n,idx in zip(Glig.batch_num_nodes(),keyidx)]
-                labelxyz=to_cuda(labelxyz,device)
-                labelidx=to_cuda(labelidx, device)
-                edge=to_cuda(edge, device)
+                edge = to_cuda(edge, device)
+                
+                if Glig != None:
+                    Glig = to_cuda(Glig,device)
+                    labelidx = [torch.eye(n)[idx] for n,idx in zip(Glig.batch_num_nodes(),keyidx)]
+                    labelxyz = to_cuda(labelxyz,device)
+                    labelidx = to_cuda(labelidx, device)
+                else:
+                    labelxyz, labelidx = None, None
 
-                Yrec_s, z, pred = ddp_model(to_cuda(Grec, device), to_cuda(node, device),
-                                            to_cuda(Glig, device), to_cuda(labelidx, device), to_cuda(edge, device))
+                Yrec_s, z, MotifP = ddp_model(to_cuda(Grec, device), to_cuda(node, device),
+                                              Glig, labelidx,
+                                              to_cuda(edge, device))
         
-                if Yrec_s.shape[1] != 4: continue ##debug -- why?
+                #if Yrec_s.shape[1] != 4: continue ##debug -- why?
 
                 ## 1. GridNet loss related
-                pred = torch.sigmoid(pred) # Then convert to sigmoid (0~1)
-                preds = [pred] # assume batchsize=1
+                MotifP = torch.sigmoid(MotifP) # Then convert to sigmoid (0~1)
+                MotifPs = [MotifP] # assume batchsize=1
                 t1 = time.time()
 
                 # labels/mask have different size & cannot be Tensored -- better way?
@@ -246,21 +254,23 @@ def train_one_epoch(ddp_model,optimizer,loader,rank,epoch,is_train):
                 grids     = [v["grids"] for v in info]
             
                 # 1-1. GridNet main losses; c-category g-group r-reverse contrast-contrast
-                lossGc,lossGg,lossGr,bygrid = MaskedBCE(labels,preds,masks,device)
+                lossGc,lossGg,lossGr,bygrid = MaskedBCE(labels,MotifPs,masks,device)
                 lossGr = w_false*lossGr
-                lossGcontrast =  w_contrast*ContrastLoss(preds,masks,device) # make overal prediction low as possible
+                lossGcontrast =  w_contrast*ContrastLoss(MotifPs,masks,device) # make overal prediction low as possible
 
                 ## 1-2. GridNet-regularize pre-sigmoid value |x|<4
-                p_reg = torch.nn.functional.relu(torch.sum(pred*pred-25.0)) #safe enough?
+                p_reg = torch.nn.functional.relu(torch.sum(MotifP*MotifP-25.0)) #safe enough?
 
-                ## 2. TRnet loss starts here
-                # 2-1. structural loss
-                lossTs, mae = structure_loss(Yrec_s, labelxyz,device) #both are Kx3 coordinates
-            
+                lossTs = torch.tensor(0.0)
+                if Yrec_s != None:
+                    ## 2. TRnet loss starts here
+                    # 2-1. structural loss
+                    lossTs, mae = structure_loss(Yrec_s, labelxyz, device) #both are Kx3 coordinates
+                    
                 ## 3. Full regularizer
                 l2_reg, p_reg = torch.tensor(0.).to(device),torch.tensor(0.).to(device)
                 if is_train:
-                    p_reg = torch.nn.functional.relu(torch.sum(pred*pred-25.0))
+                    p_reg = torch.nn.functional.relu(torch.sum(MotifP*MotifP-25.0))
                     for param in ddp_model.parameters(): l2_reg += torch.norm(param)
                 
                 ## final loss
@@ -322,8 +332,8 @@ def grouped_label(label,device):
             
 def MaskedBCE(labels,preds,masks,device):
     # Batch
-# device=torch.device("cuda:%d"%rank if (torch.cuda.is_available()) else "cpu")
-#   print("maskedbce",device)
+    # device=torch.device("cuda:%d"%rank if (torch.cuda.is_available()) else "cpu")
+    #   print("maskedbce",device)
 
     lossC = torch.tensor(0.0).to(device)
     lossG = torch.tensor(0.0).to(device)
