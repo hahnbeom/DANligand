@@ -3,7 +3,7 @@ import torch
 import sys,os
 import torch.nn.functional as F
 from torch import nn
-from src.model import 
+from src.model import MyModel
 from src.dataset import DataSet, collate
 from torch.utils import data
 
@@ -12,34 +12,44 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 MAXEPOCHS = 100
 LR = 1.0e-5
 W_REG = 0.0001
+DEBUG = '-debug' in sys.argv
 
-set_params = {'datapath':'/ml/'
+set_params = {'datapath':'/ml/motifnet/HmapPPDB/trainable/',
+              'debug'   : DEBUG
               }#use default
 
-model_params = {'num_node_feats': 22, # 20 aas + sep2cen + is_pep
-                'num_edge_feats': 2, # distance + seqsep
-                'n_layers_encoder': 3,
-                'n_layers_decoder': 3,
-                'latent_dim': 8,
+model_params = {'num_node_feats': 24+1024, # 20 aas + 4 pos-encode + Embedding_s(1024)
+                'num_edge_feats': 1, # distance 
+                'n_layers_rec': 3,
+                'n_layers_frag': 3,
+                'num_channels'  : 64
                 }
 
 loader_params = {
     'shuffle': False,
-    'num_workers': 5 if '-debug' not in sys.argv else 1,
+    'num_workers': 1 if DEBUG else 5,
     'pin_memory': True,
     'collate_fn': collate,
     'batch_size': 1}
 
+def custom_loss( pred, label ):
+    sim = torch.sum(pred*label)
+    return sim 
+
 def run_an_epoch(loader,model,optimizer,epoch,train):
     temp_loss = {'total':[],'loss1':[],'loss2':[]}
     
-    for i, (seq_Ab, G_Ag, info) in enumerate(loader):
+    for i, (x_frag, G_rec, info) in enumerate(loader):
         if train: optimizer.zero_grad()
-        if not G_Ag or G_Ag == None: continue
+        if not G_rec or G_rec == None: continue
 
-        G_Ag = G_Ag.to(device)
-        pred = model(G_Ag, seq_Ab)
-        label = info['label'].to(device)
+        x_frag = x_frag.to(device)
+        G_rec = G_rec.to(device)
+        
+        pred = model(x_frag, G_rec)
+        label = torch.zeros(pred.shape[0]).to(device)
+        label[info['label']] = 1.0
+        
         loss1 = torch.tensor(0.0).to(device)
         loss2 = torch.tensor(0.0).to(device)
 
@@ -51,6 +61,7 @@ def run_an_epoch(loader,model,optimizer,epoch,train):
         for param in model.parameters(): loss2 += torch.norm(param)
         loss2 = W_REG*loss2
 
+        '''
         if DEBUG:
             for s,l in zip(seq_Ab, label):
                 form = "%3d %8.3f %8.3f %8.3f : %8.3f %8.3f %8.3f, loss %8.5f %8.5f"
@@ -58,6 +69,7 @@ def run_an_epoch(loader,model,optimizer,epoch,train):
                     print(form%(i,a[i,0],a[i,1],a[i,2],
                                 p[idx,:][i,0],p[idx,:][i,1],p[idx,:][i,2],
                                 float(loss1),float(loss2)))
+        '''
         
         loss = loss1 + loss2
         if train:
@@ -101,12 +113,12 @@ def load_model(modelname):
     return model, optimizer, epoch, train_loss, valid_loss
 
 def main():    
-    train_set = DataSet(np.load("data/trainlist.npy"), **set_params)
+    train_set = DataSet(np.load("data/trainlist.v1.npy")[:100], **set_params)
     train_loader = data.DataLoader(train_set,
                                    worker_init_fn=lambda _: np.random.seed(),
                                    **loader_params)
 
-    valid_set = DataSet(np.load("data/validlist.npy"), **set_params)
+    valid_set = DataSet(np.load("data/validlist.v1.npy")[:10], **set_params)
     valid_loader = data.DataLoader(valid_set,
                                    worker_init_fn=lambda _: np.random.seed(),
                                    **loader_params)

@@ -1,28 +1,33 @@
 import torch
 import numpy as np
 import dgl
-import sys,copy
+import sys
+import os
 
 def collate(samples):
     #samples should be G,info
-    valid = [v[0] for v in samples]
-
+    valid = [v[1] for v in samples if v[1]]
+    if len(valid) == 0:
+        return False, False, {}
+    
     #try:
     if True:
         Gs = []
-        info = {key:[] for key in samples[0][1].keys()}
+        frag_emb = []
+        info = {key:[] for key in samples[0][2].keys()}
         
         for s in samples:
-            Gs.append(s[0])
-            for key in s[1]:
-                info[key].append(s[1][key])
+            frag_emb.append(s[0])
+            Gs.append(s[1])
+            for key in s[2]:
+                info[key].append(s[2][key])
 
-        info['xyz_lig'] = torch.stack(info['xyz_lig'],dim=0)
-        #info['pepidx'] = torch.stack(info['pepidx'],dim=0)
-        #info['pepidx'] = torch.tensor(info['pepidx'],dtype=torch.uint8)
-        bG = dgl.batch(Gs)
+        info['label'] = torch.stack(info['label'],dim=0)
         
-        return bG, info
+        bG = dgl.batch(Gs)
+        frag_emb = torch.stack(frag_emb,dim=0)
+        
+        return frag_emb, bG, info
 
     #except:
     else:
@@ -30,145 +35,133 @@ def collate(samples):
         return None, {}
 
 class DataSet(torch.utils.data.Dataset):
-    def __init__(self, fs, datapath='/ml/pepbdb/',
-                 neighmode='dist',
-                 dcut=12.0, top_k=8,
-                 peplen=5):
+    def __init__(self, targets, datapath='/ml/motifnet/HmapPPDB/trainable/',
+                 neighmode='topk',
+                 dcut=12.0, top_k=12,
+                 debug=False):
         
-        self.fs = fs
+        self.targets = targets
         self.datapath = datapath
         self.neighmode = neighmode
         self.dcut = dcut
         self.top_k = 8
-        self.peplen = peplen
-        self.pepshift = int((peplen-1)/2)
+        self.debug = debug
             
     def __len__(self):
-        return len(self.fs)
+        return len(self.targets)
     
     def __getitem__(self, index): #N: maximum nodes in batch
-        ipdb = index%len(self.fs)
-        prefix = self.fs[ipdb].split('.')[0]
-        cenres = int(self.fs[ipdb].split('.')[1])
+        interface_npz = self.datapath+self.targets[index]+'.interface.npz'
+        pdbid = self.targets[index][:4]
+
+        # 1. random pick single entry from the interface
+        data = np.load(interface_npz,allow_pickle=True)
+        frags = data['frags']
+        ifrag = np.random.randint(len(frags))
         
-        pdb = self.datapath+'/'+prefix+'.complex.pdb'
-        #try:
-        if True:
-            G, xyz_lig, pepidx = self.read_pdb(pdb, cenres)
-            info = {'tag':self.fs[ipdb],
-                    'xyz_lig':xyz_lig.float(),
-                    'pepidx':pepidx}
-        #except:
-        else:
-            print("failed reading", pdb)
-            return False, {}
+        frag = frags[ifrag] #rc
+        aas_frag = data['frag_aas'][ifrag]
+        
+        aa1index = ['A','C','D','E','F','G','H','I','K','L','M','N','P','Q','R','S','T','V','W','Y']
+        aas_frag = np.array([aa1index.index(aa) for aa in aas_frag],dtype=int)
+        
+        rec_interface = data['interface'][ifrag] #rc; label
+        frag_chain = frag[0][0]
+        rec_chain = rec_interface[0][0]
 
-        return G, info
-
-    def read_pdb(self,pdb, pepcen):
-        # make receptor as non-X, ligand as chain X
-        xyz = []
-        aas = []
-        seqsep = []
-        pepidx = []
-    
-        crs = []
-        seqidx = -1
-        for l in open(pdb):
-            if not l.startswith('ATOM'): continue
-            aname = l[12:16].strip()
-            if aname != 'CA': continue
+        # sanity check for files
+        fs = [self.datapath+'../ESMembedding/%s%s.embedding.npz'%(pdbid,rec_chain),
+              self.datapath+'../ESMembedding/%s%s.embedding.npz'%(pdbid,frag_chain)]
+        for f in fs:
+            if not os.path.exists(f):
+                print(f"missing {f} for {self.targets[index]}")
+                return False, False, {}
             
-            chain = l[21]
-            resno = l[22:26]
+        ## 2. retrieve ESMfold embedding
+        rec_emb_data = np.load(fs[0],allow_pickle=True)
+        rec_s = rec_emb_data['s']
+        #rec_z = rec_emb_data['z'] #pairwise
+        frag_emb_data = np.load(fs[1],allow_pickle=True)
+        frag_s = frag_emb_data['s']
+        #frag_z = frag_emb_data['z']
+
+        # add dummy embedding at the end
+        rec_s = np.concatenate([rec_s,np.zeros((1,rec_s.shape[-1]))])
+        #rec_z = np.concatenate([rec_z,np.zeros((1,rec_s.shape[-1]))])
+        frag_s = np.concatenate([rec_s,np.zeros((1,frag_s.shape[-1]))])
+        #frag_z = np.concatenate([frag_z,np.zeros((1,frag_z.shape[-1]))])
+
+        ## 3. retrieve interface label definition
+        prop_npz = self.datapath+pdbid+'.prop.npz'
+        propdata = np.load(prop_npz,allow_pickle=True)
+         
+        xyz_rec = propdata['xyz'].item()[rec_chain]
+        aas_rec = propdata['aas'].item()[rec_chain]
+        rc_rec = propdata['rc'].item()[rec_chain]
+
+        iemb_frag = [int(rc.split('.')[-1])-1 for rc in frag]
+        iemb_rec = [int(rc.split('.')[-1])-1 for rc in rc_rec]
+
+        aas_rec = np.array([aa1index.index(aas_rec[rc]) for rc in rc_rec],dtype=int)
+        ## 4. build rec_graph & frag_feature
+        
+        try:
+            G_rec = self.make_graph(xyz_rec, aas_rec, rec_s[iemb_rec]) #
             
-            if resno[-1] != ' ' or crs == []:
-                seqidx += 1
-            elif chain != crs[-1].split('.')[0]:
-                seqidx += 200
-            else:
-                prvres = crs[-1].split('.')[-1]
-                seqidx += int(resno[:-1])-int(prvres[:-1])
+            aas_frag = np.eye(20)[aas_frag] # 1hot encoded
+            pos_enc = np.zeros((aas_frag.shape[0],4)) #4-dim positional encoding
+            pos_enc[:,0] = np.sin(np.arange(1000,1000+aas_frag.shape[0]))
+            pos_enc[:,1] = np.cos(np.arange(1000,1000+aas_frag.shape[0]))
+            pos_enc[:,2] = np.sin(np.arange(1000,1000+aas_frag.shape[0])/10000**(1.0/32.0))
+            pos_enc[:,3] = np.cos(np.arange(1000,1000+aas_frag.shape[0])/10000**(1.0/32.0))
+            
+            frag_emb = np.concatenate([aas_frag,pos_enc,frag_s[iemb_frag]],axis=1)
+            frag_emb = torch.tensor(frag_emb)
+            
+            label = torch.tensor([rc_rec.index(rc) for rc in rec_interface],dtype=int)
+            
+            info = {'tag':self.targets[index]+'.'+str(ifrag),
+                    'label':label}
+        except:
+            print("failed reading", self.targets[index])
+            if self.debug:
+                G_rec = self.make_graph(xyz_rec, aas_rec, rec_s[iemb_rec]) #
 
-            aaindex = aa3toindex(l[17:20])
-            if aaindex < 0: continue # 
+                aas_frag = np.eye(20)[aas_frag] # 1hot encoded
+                frag_emb = np.concatenate([aas_frag,frag_s[iemb_frag]],axis=1)
+                frag_emb = torch.tensor(frag_emb)
+            
+                label = torch.tensor([rc_rec.index(rc) for rc in rec_interface],dtype=int)
+            
+                info = {'tag':self.targets[index]+'.'+str(ifrag),
+                        'label':label}
+                
+            return False, False, {}
 
-            seqsep.append(seqidx)
-            crs.append(chain+'.'+resno)
-        
-            crd = np.array([float(l[30:38]), float(l[38:46]), float(l[46:54])])
-            xyz.append(crd)
-            aas.append(aaindex)
-        
-            if chain == 'X':
-                pepidx.append(len(aas)-1)
+        return frag_emb, G_rec, info
 
-        xyz = np.array(xyz)
-        nrec = len(xyz) - len(pepidx)
-
-        # store as label
-        istart = nrec+pepcen-self.pepshift
-        iend = nrec+pepcen+self.pepshift+1
-        pepidx = pepidx[pepcen-self.pepshift:pepcen+self.pepshift+1]
-
-        # take pep info at :nrec & pep
-        xyz = np.concatenate([xyz[:nrec],xyz[pepidx]])
-        xyz_lig = xyz[nrec:]
-        pepidx = np.arange(nrec,nrec+self.peplen)
-
-        # reorient coord at COM
-        xyz_com = xyz_lig[self.pepshift]
-        xyz_lig = xyz_lig - xyz_com # label
-        xyz = xyz - xyz_com
-        xyz[nrec:,:] = 0.0 # initialize at origin
-
-        aas    = [a for i,a in enumerate(aas) if i < nrec or i in pepidx]
-        seqsep = [a for i,a in enumerate(seqsep) if i < nrec or i in pepidx]
-
+    def make_graph(self, xyz, aas, s):
         X = torch.tensor(xyz[None,]) #expand dimension
         dX = torch.unsqueeze(X,1) - torch.unsqueeze(X,2)
         u,v,d_ = find_dist_neighbors(dX, dcut=self.dcut, mode=self.neighmode, top_k=self.top_k)
 
         d_ = d_[u,v]
-        aas1hot = torch.eye(20)[aas] # 1hot encoded
+        aas1hot = np.eye(20)[aas] # 1hot encoded
+        pos_enc = np.zeros((aas.shape[0],4)) #4-dim positional encoding
+        pos_enc[:,0] = np.sin(np.arange(aas.shape[0]))
+        pos_enc[:,1] = np.cos(np.arange(aas.shape[0]))
+        pos_enc[:,2] = np.sin(np.arange(aas.shape[0])/10000**(1.0/32.0))
+        pos_enc[:,3] = np.cos(np.arange(aas.shape[0])/10000**(1.0/32.0))
 
-        sep2cen = torch.zeros(len(aas),dtype=float)
-        sep2cen[:nrec] = 0
-        sep2cen[nrec:] = torch.arange(-self.pepshift,self.pepshift+1)
-        sep2cen = torch.tanh(0.3*sep2cen)
-
-        is_pep = torch.zeros(len(aas),dtype=int)
-        is_pep[nrec:] = 1
-
-        is_pep = is_pep[:,None]
-        sep2cen = sep2cen[:,None]
-        nodefeats = torch.cat([aas1hot,sep2cen,is_pep],dim=1)
-
-        seqsep = torch.tensor(seqsep)
-        seqsep[nrec:] += 200
-        seqsep = abs(seqsep[:,None] - seqsep[None,:])
-        seqsep = seqsep[u,v]
-
-        edata = torch.zeros((u.shape[0],2))
-        edata[:,0] = torch.tanh( 0.03*seqsep )  #positional_embedding( seqsep )
-        edata[:,1] = normalize_distance(d_) #2
-
+        nodefeats = np.concatenate([aas1hot,pos_enc,s],axis=1)
+        
         G = dgl.graph((u,v))
         G.ndata['attr'] = torch.tensor(nodefeats).float()
         G.ndata['x'] = torch.tensor(xyz).float()[:,None,:]
-        G.edata['attr'] = edata
+        G.edata['attr'] = torch.tensor(d_[:,None]).float()
         G.edata['rel_pos'] = dX[:,u,v].float()[0]
 
-        return G, torch.tensor(xyz_lig), pepidx
-
-def aa3toindex(aa3):
-    aa3list = ['ALA','CYS','ASP','GLU','PHE','GLY','HIS','ILE','LYS','LEU',
-               'MET','ASN','PRO','GLN','ARG','SER','THR','VAL','TRP','TYR']
-    
-    if aa3 in aa3list:
-        return aa3list.index(aa3)
-    else:
-        return -1
+        return G
 
 def normalize_distance(D,maxd=5.0):
     d0 = 0.5*maxd #center

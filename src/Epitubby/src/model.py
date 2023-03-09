@@ -2,78 +2,107 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from SE3.se3_transformer.model import SE3Transformer
-from SE3.se3_transformer.model.fiber import Fiber
+from torch_geometric.nn import GATConv
 
-class SE3TransformerAutoEncoder(nn.Module):
+class MyModel(nn.Module):
     def __init__(self,
                  num_node_feats,
                  num_edge_feats,
                  num_channels=32,
-                 n_layers_encoder = 3,
-                 n_layers_decoder = 3,
-                 latent_dim = 4,
-                 scale = 1.0
+                 n_layers_rec  = 3,
+                 n_layers_frag = 3,
+                 head = 8, # heads in GAT
+                 hid = 4, # hidden dim in GAT
+                 dropout=0.2
     ):
         super().__init__()
+        self.num_channels = num_channels
+        self.n_layers_rec = n_layers_rec
 
-        self.scale = scale
-        self.input_layer = nn.Linear( num_node_feats, num_channels )
+        collapse_esm = []
+        linear_comb = []
+
+        mid1 = int(num_node_feats/2)
+        mid2 = int(num_node_feats/4)
+        mid3 = 24 + mid2
+
+        self.dropoutlayer = nn.Dropout(dropout)
         
-        #if latent_dim*2 < num_channels:
-        #    mid_dim = latent_dim*2
-        #else:
-        mid_dim = num_channels
-
-        # SE3 encoder
-        self.encoder = SE3Transformer(
-            num_layers   = n_layers_encoder,
-            num_heads    = 4,
-            channels_div = 4,
-            #num_degrees  = 3,
-            fiber_in = Fiber({0: num_node_feats}),
-            fiber_hidden=Fiber.create( 3, num_channels ),
-            fiber_out = Fiber({0: latent_dim, 1: latent_dim }),
-            fiber_edge = Fiber({0: num_edge_feats}),
-        )
-
-        # SE3 encoder
-        self.mid_layers0 = nn.ModuleList( [nn.Linear(latent_dim, mid_dim) ] )
-        self.mid_layers1 = nn.ModuleList( [nn.Linear(latent_dim, mid_dim) ] )
+        collapse_esm.append(nn.Linear( num_node_feats-24, mid1 ))
+        collapse_esm.append(nn.Linear( mid1, mid2 ))
         
-        self.decoder = SE3Transformer(
-            num_layers   = n_layers_decoder,
-            num_heads    = 4,
-            channels_div = 4,
-            #num_degrees  = 3,
-            fiber_in = Fiber({0: mid_dim, 1:mid_dim}),
-            fiber_hidden=Fiber.create( 3, num_channels ),
-            fiber_out = Fiber({1:1}),
-            fiber_edge=Fiber({0:num_edge_feats}),
-        )
+        linear_comb.append(nn.Linear( mid3, num_channels ))
+        #linear_comb.append()
 
-    def forward(self, G):
-        node_features = {"0": G.ndata["attr"][:,:,None].float()}
-        edge_features = {"0": G.edata["attr"][:,:,None].float()}
+        self.collapse_esm = nn.ModuleList( collapse_esm )
+        self.linear_comb = nn.ModuleList( linear_comb )
 
-         # encode time step
-        z = self.encoder( G, node_features, edge_features )
+        # GAT at receptor level
+        GAT = []
+        for _ in range(n_layers_rec): # use unshared weights
+            GATconv1 = GATConv(self.num_channels, hid, head, dropout=dropout)
+            GATconv2 = GATConv(head * hid, self.num_channels,
+                               concat=False, heads=1, dropout=dropout)
+            GAT.append(GATconv1)
+            GAT.append(GATconv2)
 
-        #print(z['1'].shape, z['1'][-5:,:])
-        h0 = z['0'].squeeze()
-        for layer in self.mid_layers0:
-            h0 = layer(h0)
+        self.GAT = nn.ModuleList( GAT )
+        self.final_linear = nn.Linear(num_channels,1,bias=True)
 
-        h1 = z['1'].squeeze()
-        h1 = h1.transpose(2,1)
-        for layer in self.mid_layers1:
-            h1 = layer(h1)
-        h1 = h1.transpose(1,2)
+    def forward(self, frag_emb, G_rec ):
+        node_features = G_rec.ndata["attr"].float()
+        edge_features = G_rec.edata["attr"].float()
+        frag_emb = frag_emb.float()
 
-        node_features = {"0": h0[:,:,None].float(), "1":h1[:,:].float()}
-        h = self.decoder( G, node_features, edge_features )
-        l1pred = h['1'].transpose(0,1)*self.scale # B x N x 3
-        #print(l1pred.shape, l1pred[0,-5:,:])
+        u,v = G_rec.edges()
+        N = node_features.shape[0]
+        edge_index = torch.zeros((2,len(u)),dtype=int).to(G_rec.device)
+        edge_index[0,:] = u
+        edge_index[1,:] = v
+
+        #print(edge_index.shape, len(u), edge_features.shape, N)
+
+        x = self.dropoutlayer( node_features )
+        x_esm = x[:,24:] #"batched_graph_nodes"
+        for layer in self.collapse_esm:
+            x_esm = layer(x_esm)
+
+        x = torch.cat([x[:,:24],x_esm],dim=1)
+        for layer in self.linear_comb:
+            x = layer(x)
+
+        for i,layer in enumerate(self.GAT):
+            x = layer( x, edge_index=edge_index, edge_attr=edge_features )
+            if i%2 == 0: x = torch.nn.functional.elu(x)
+
+        #TODO: split into batch
+
+        # frag_emb: B x 9 x c
+        ys = self.dropoutlayer( frag_emb )
+        y_esm = ys[:,:,24:]
+        for layer in self.collapse_esm:
+            y_esm = layer(y_esm)
+
+        ys = torch.cat([ys[:,:,:24],y_esm],dim=2)
+        for layer in self.linear_comb:
+            ys = layer(ys)
+
+        ps = []
+        i = 0
+        for n,y in zip(G_rec.batch_num_nodes(),ys):
+            A = torch.einsum('id,jd->ij', x[i:i+n,:], y)
+            A = torch.softmax(A,dim=1) #sum-up to 1 over dim=1 (==fragment res index)
+            #print(A.shape, torch.sum(A,dim=1))
         
-        return l1pred
+            # pool over receptor dim
+            #"per-recres fragP" 
+            p = torch.einsum('ij,jd->id', A,y)
+            ps.append(p)
+            i += n
+
+        ps = torch.stack(ps,dim=0)
+        ps = self.final_linear(ps) # shrink to 1-dim; replace pooling
+        ps = torch.sigmoid(ps).squeeze()
+
+        return ps
 
