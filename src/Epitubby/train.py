@@ -7,11 +7,12 @@ from src.model import MyModel
 from src.dataset import DataSet, collate
 from torch.utils import data
 
-BATCH_SIZE = 1
+BATCH_SIZE = 20
 device = "cuda" if torch.cuda.is_available() else "cpu"
 MAXEPOCHS = 100
-LR = 1.0e-5
+LR = 1.0e-3
 W_REG = 0.0001
+W_FP = 0.5
 DEBUG = '-debug' in sys.argv
 
 set_params = {'datapath':'/ml/motifnet/HmapPPDB/trainable/',
@@ -27,14 +28,25 @@ model_params = {'num_node_feats': 24+1024, # 20 aas + 4 pos-encode + Embedding_s
 
 loader_params = {
     'shuffle': False,
-    'num_workers': 1 if DEBUG else 5,
+    'num_workers': 5 if DEBUG else 1,
     'pin_memory': True,
     'collate_fn': collate,
-    'batch_size': 1}
+    'batch_size': BATCH_SIZE}
 
 def custom_loss( pred, label ):
-    sim = torch.sum(pred*label)
-    return sim 
+    entropy1 = torch.tensor(0.0).to(device)
+    entropy2 = torch.tensor(0.0).to(device)
+    
+    for p,lidx in zip(pred,label):
+        lidx = lidx.to(device)
+        l = torch.zeros(p.shape[0]).to(device)
+        l[lidx] = 1.0
+        
+        entropy1 += -torch.sum(l*torch.log(p+1.0e-8))
+        # penalize false positives
+        entropy2 = -torch.sum((1.0-l)*torch.log(1.0-p+1.0e-8))
+    
+    return entropy1, entropy2
 
 def run_an_epoch(loader,model,optimizer,epoch,train):
     temp_loss = {'total':[],'loss1':[],'loss2':[]}
@@ -47,37 +59,28 @@ def run_an_epoch(loader,model,optimizer,epoch,train):
         G_rec = G_rec.to(device)
         
         pred = model(x_frag, G_rec)
-        label = torch.zeros(pred.shape[0]).to(device)
-        label[info['label']] = 1.0
+        label = info['label']
         
-        loss1 = torch.tensor(0.0).to(device)
-        loss2 = torch.tensor(0.0).to(device)
-
         # weighted cosine similarity
-        loss1 = custom_loss(pred, label)
+        loss1,loss2 = custom_loss(pred, label)
+        loss2 = loss2*W_FP
 
         # regularization term
-        loss2 = torch.tensor(0.).to(device)
-        for param in model.parameters(): loss2 += torch.norm(param)
-        loss2 = W_REG*loss2
+        loss_reg = torch.tensor(0.).to(device)
+        for param in model.parameters(): loss_reg += torch.norm(param)
+        loss_reg = W_REG*loss_reg
 
-        '''
         if DEBUG:
-            for s,l in zip(seq_Ab, label):
-                form = "%3d %8.3f %8.3f %8.3f : %8.3f %8.3f %8.3f, loss %8.5f %8.5f"
-                for i in range(len(a)):
-                    print(form%(i,a[i,0],a[i,1],a[i,2],
-                                p[idx,:][i,0],p[idx,:][i,1],p[idx,:][i,2],
-                                float(loss1),float(loss2)))
-        '''
+            for p,l in zip(pred,label):
+                print(torch.sum(l))
         
-        loss = loss1 + loss2
+        loss = loss1 + loss2 + loss_reg
         if train:
             loss.backward()
             optimizer.step()
-            print(f"TRAIN Epoch {epoch} | Loss: {loss.item()} ")
+            print(f"TRAIN Epoch {epoch} | Loss: {loss.item():9.4f} {loss1.item():9.4f} / {loss2.item():9.4f} ")
         else:
-            print(f"VALID Epoch {epoch} | Loss: {loss.item()} ")
+            print(f"VALID Epoch {epoch} | Loss: {loss.item():9.4f} {loss1.item():9.4f} / {loss2.item():9.4f} ")
 
         temp_loss["total"].append(loss.cpu().detach().numpy()) #store as per-sample loss
         temp_loss["loss1"].append(loss1.cpu().detach().numpy()) #store as per-sample loss
@@ -113,12 +116,12 @@ def load_model(modelname):
     return model, optimizer, epoch, train_loss, valid_loss
 
 def main():    
-    train_set = DataSet(np.load("data/trainlist.v1.npy")[:100], **set_params)
+    train_set = DataSet(np.load("data/trainlist.v1.npy")[:1000], **set_params)
     train_loader = data.DataLoader(train_set,
                                    worker_init_fn=lambda _: np.random.seed(),
                                    **loader_params)
 
-    valid_set = DataSet(np.load("data/validlist.v1.npy")[:10], **set_params)
+    valid_set = DataSet(np.load("data/validlist.v1.npy")[:100], **set_params)
     valid_loader = data.DataLoader(valid_set,
                                    worker_init_fn=lambda _: np.random.seed(),
                                    **loader_params)

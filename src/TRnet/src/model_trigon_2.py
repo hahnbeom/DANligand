@@ -19,8 +19,6 @@ from src.trigon_2 import get_pair_dis_one_hot
 from src.other_utils import MaskedSoftmax
 from src.other_utils import masked_softmax
 
-
-
 class SE3TransformerWrapper(nn.Module):
     """SE(3) equivariant GCN with attention"""
     def __init__(self, num_layers_lig=2,
@@ -42,7 +40,8 @@ class SE3TransformerWrapper(nn.Module):
 
         # "d": self.l0_out_features
         d = l0_out_features
-
+        
+        self.d = d
         self.l1_in_features = l1_in_features
         self.scale = 1.0 # num_head #1.0/np.sqrt(float(d))
         self.K = K
@@ -75,10 +74,7 @@ class SE3TransformerWrapper(nn.Module):
             fiber_edge=Fiber({0: 1}), #always just distance
         )
     
-
-
         # trigonometry related
-        
         self.n_trigonometry_module_stack = n_trigonometry_module_stack
         self.dropout = nn.Dropout2d(p=dropout)
         self.tranistion = Transition(embedding_channels=embedding_channels, n=4)
@@ -89,19 +85,10 @@ class SE3TransformerWrapper(nn.Module):
         self.Wls = nn.Linear(d,d)
         self.linear = nn.Linear(embedding_channels, 1)
 
-
-
         self.protein_to_compound_list = nn.ModuleList([TriangleProteinToCompound_v2(embedding_channels=embedding_channels, c=c) for _ in range(n_trigonometry_module_stack)])
-        self.triangle_self_attention_list = nn.ModuleList([TriangleSelfAttentionRowWise(embedding_channels=embedding_channels) for _ in range(n_trigonometry_module_stack)])
-
-
+        self.triangle_self_attention_list = nn.ModuleList([TriangleSelfAttentionRowWise(embedding_channels=embedding_channels, c=c) for _ in range(n_trigonometry_module_stack)])
         
     def forward(self, Grec, Glig, labelidx):
-
-        
-        for i in labelidx:
-            print(i.shape)
-
         size1 = Grec.batch_num_nodes()
         size2 = Glig.batch_num_nodes()
 
@@ -141,29 +128,18 @@ class SE3TransformerWrapper(nn.Module):
 
         label_to_batch = labelidx[0].transpose(1,0)
 
-
         for i in range(1,len(size1)):
             label_to_batch = torch.cat((label_to_batch,labelidx[i].transpose(1,0)),dim=0)
-
-        # print(batchvec_lig.is_cuda, batchvec_rec.is_cuda, label_to_batch.is_cuda)
-
 
 
         label_batched, label_mask = to_dense_batch(label_to_batch, batchvec_lig)
         label_batched = label_batched.transpose(2,1) # b x K x j
-
-        # h_l = torch.matmul(idx1hot,h_l) # K x d
-        # ligxyz = torch.einsum('bjk,bjkb->ikb',label_batched,ligxyz)
 
         hs_rec_batched, hs_rec_mask = to_dense_batch(hs_rec, batchvec_rec)
         hs_lig_batched, hs_lig_mask = to_dense_batch(hs_lig, batchvec_lig)
 
         r_coords_batched, r_coords_mask = to_dense_batch(recxyz, batchvec_rec)
         l_coords_batched, l_coords_mask = to_dense_batch(ligxyz, batchvec_lig)
-
-        # print('hs_lig_mask',hs_lig_mask.shape)
-        # print('l_coords_batched',l_coords_batched.shape)
-        # print('label_batched',label_batched.shape)
 
         hs_lig_batched = torch.einsum('bkj,bjd->bkd',label_batched,hs_lig_batched)
         hs_lig_mask = torch.einsum('bkj,bj->bk',label_batched,hs_lig_mask.float())
@@ -174,12 +150,11 @@ class SE3TransformerWrapper(nn.Module):
         z = torch.einsum('bnd,bmd->bnmd', hs_rec_batched, hs_lig_batched )
         z_mask = torch.einsum('bn,bm->bnm',hs_rec_mask, hs_lig_mask )
 
-        rec_pair = get_pair_dis_one_hot(r_coords_batched, bin_size=2, bin_min=-1)
-        lig_pair = get_pair_dis_one_hot(l_coords_batched, bin_size=2, bin_min=-1)
+        rec_pair = get_pair_dis_one_hot(r_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d)
+        lig_pair = get_pair_dis_one_hot(l_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d)
         
         rec_pair = rec_pair.float()
         lig_pair = lig_pair.float()
-        
 
         for i_module in range(self.n_trigonometry_module_stack):
             z = z + self.dropout(self.protein_to_compound_list[i_module](z, rec_pair, lig_pair, z_mask.unsqueeze(-1)))

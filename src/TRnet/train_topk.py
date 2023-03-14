@@ -4,11 +4,12 @@ import time
 import dgl
 #import dgl.function as fn
 import torch.nn as nn
+import random
 #import torch.nn.functional as F
 import numpy as np
-from src.model_mix import SE3TransformerWrapper
-import src.dataset_mix as dataset
-from src.myutils import generate_pose, report_attention
+from src.model_trigon_2 import SE3TransformerWrapper
+import src.dataset as dataset
+from src.myutils import generate_pose, report_attention, show_how_attn_moves
 from os import listdir
 from os.path import join, isdir, isfile
 
@@ -17,15 +18,38 @@ warnings.filterwarnings("ignore", message="DGLGraph\.__len__")
 
 device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
 
-MAXEPOCH = 1000
-BATCH = 10 # ~3time faster w/ B=10, ~4 times w/ B=20
+## cutline ---- ligandsize : 150 gridsize : 2200
+MAXEPOCH = 500
+BATCH = 2 # ~3time faster w/ B=10, ~4 times w/ B=20
 LR = 1.0e-4 #2.0e-3
 K = 4 # num key points
+datapath = '/ml/motifnet/TRnet.ligand'
 verbose = False
-datapath = '/home/hpark/data'
-neighmode = 'topk' #'distT'
 modelname = sys.argv[1]
+
 w_reg = 1.e-4
+w_spread = 3.0
+
+setparams = {'K':K,
+             'datapath':datapath,
+             'neighmode':'topk',
+             'topk'  : 16,
+             'mixkey': True
+             }
+
+modelparams = {'num_layers_lig':3,
+               'num_layers_rec':2,
+               'num_channels':16, #within se3
+               'l1_in_features':0,
+               'l0_out_features':32, #at Xatn
+               'n_heads_se3':4,
+               'embedding_channels':32,
+               'c':32,
+               'n_trigonometry_module_stack':5, 
+               'div':4,
+               'K':K,
+               'dropout':0.2,
+}
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -39,57 +63,57 @@ def collate(samples):
     info = []
     for s in samples:
         if s == None: continue
-
-        ## ensure all has same datatype
-        datatype = s[4]['datatype'] 
-        if len(info) > 0 and datatype != info[0]['datatype']:
-            continue
-        
         Grec.append(s[0])
         Glig.append(s[1])
-
         labelxyz.append(s[2])
         label.append(torch.tensor(s[3]))
         info.append(s[4])
 
-    labelxyz = torch.stack(labelxyz,dim=0).squeeze()
+    if len(labelxyz) == 1:
+        labelxyz = torch.cat(labelxyz)[None,...]
+    else:
+        labelxyz = torch.stack(labelxyz,dim=0).squeeze()
     label = torch.stack(label,dim=0).squeeze()
 
     a = dgl.batch(Grec)
     b = dgl.batch(Glig)
 
-    #print([a['datatype'] for a in info])
-    return dgl.batch(Grec), dgl.batch(Glig), labelxyz, label, info, len(samples)
+    return dgl.batch(Grec), dgl.batch(Glig), labelxyz, label, info, len(info)
 
-def custom_loss(prefix, Yrec, Ylig):
-    dY = Yrec-Ylig
-    loss = torch.sum(dY*dY,dim=1)
+def structural_loss(prefix, Yrec, Ylig):
+    # print(Ylig)
+
+    dY = Yrec-Ylig # BxKx3
+    loss1 = torch.sum(dY*dY,dim=1)
     
-    #if verbose:
-    #    for k in range(K):
-            #print("%-10s %1d"%(prefix, k), loss[k],
-            #      " %8.3f"*3%tuple(Yrec[k]), "|", " %8.3f"*3%tuple(Ylig[k]))
-
     N = Yrec.shape[0]
-    loss_sum = torch.sum(loss)/N
-    meanD = torch.mean(torch.sqrt(loss))
-    if verbose:
-        #print("%-10s MSE: %8.3f / mean(d): %8.3f"%(prefix, float(loss_sum), meanD))
-        print("%-10s MSE/ mean(d): "%prefix, float(loss_sum), meanD)
-    return loss_sum, meanD
+    loss1_sum = torch.sum(loss1)/N
+    meanD = torch.mean(torch.sqrt(loss1))
 
-modelparams = {'num_layers_lig':4,
-               'num_layers_rec':4,
-               'num_layers_denoise':2,
-               'dropout':0.2,
-               'num_channels':16, #within se3
-               'l1_in_features':0,
-               'l0_out_features':16, #at Xatn
-               'n_heads':4,
-               'nattn':1, 
-               'div':4,
-               'K':K
-}
+    #for k in range(K):
+    #    print("%-10s %1d"%(prefix, k), loss[k], Yrec[k], Ylig[k])
+        
+    return loss1_sum, meanD
+
+def spread_loss(Ylig, A, G, sig=2.0): #label(B x K x 3), attention (B x Nmax x K)
+    loss2 = torch.tensor(0.0)
+    i = 0
+    N = A.shape[0]
+    for b,n in enumerate(G.batch_num_nodes()): #batch
+        x = G.ndata['x'][i:i+n,:] #N x 1 x 3
+        z = A[b,:n,:] # N x K
+        y = Ylig[b][None,:,:].squeeze() # 1 x 4 x 3
+        
+        #print(b,int(i),int(i+n),x.shape, z.shape)
+        dX = x-y
+        
+        overlap = torch.exp(-torch.sum(dX*dX,axis=-1)/(sig*sig)) # N x 4
+        if z.shape[0] != overlap.shape[0]: continue
+
+        loss2 = loss2 - torch.sum(overlap*z)
+
+        i += n
+    return loss2 # max -(batch_size x K)
 
 model = SE3TransformerWrapper(**modelparams)
 model.to(device)
@@ -111,25 +135,17 @@ if os.path.exists("models/%s/model.pkl"%modelname):
     model_dict.update(trained_dict)
     model.load_state_dict(model_dict,strict=False)
         
-    #optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
     startepoch = checkpoint["epoch"]+1
     train_loss = checkpoint["train_loss"]
     valid_loss = checkpoint["valid_loss"]
-    
-    if 'mae' not in train_loss: train_loss['mae'] = [[0.0] for _ in range(checkpoint["epoch"])]
-    if 'maeR' not in train_loss: train_loss['maeR'] = [[0.0] for _ in range(checkpoint["epoch"])]
-    if 'reg' not in train_loss: train_loss['reg'] = [[0.0] for _ in range(checkpoint["epoch"])]
-    if 'mae' not in valid_loss: valid_loss['mae'] = [[0.0] for _ in range(checkpoint["epoch"])]
-    if 'maeR' not in valid_loss: valid_loss['maeR'] = [[0.0] for _ in range(checkpoint["epoch"])]
+
+    if 'mae' not in train_loss: train_loss['mae'] = []
+    if 'reg' not in train_loss: train_loss['reg'] = []
+    if 'mae' not in valid_loss: valid_loss['mae'] = []
 
     print("Loading a checkpoint at epoch %d"%startepoch)
-
-    # freeze all 
-    for name, param in model.named_parameters():
-        if 'denoise' not in name:
-            param.requires_grad = False
-            print("freeze", name)
 
 else:    
     if not isdir(join("models", modelname)):
@@ -146,38 +162,30 @@ else:
                     if hasattr(layer,'weight'):
                         layer.weight.data.fill_(0.0)
 
-    train_loss = {'total':[],'mae':[],'reg':[],'maeR':[]}
-    valid_loss = {'total':[],'mae':[],'maeR':[]}
+    train_loss = {'total':[],'mae':[],'reg':[],'loss1':[],'loss2':[]}
+    valid_loss = {'total':[],'mae':[],'loss1':[],'loss2':[]}
     startepoch = 0
 
 print(count_parameters(model))
 
 
-keyatms = np.load(f'data/keyatom.def.npz',allow_pickle=True)#['keyatms'].item()
+keyatms = np.load(f'{datapath}/keyatom.def.npz',allow_pickle=True)#['keyatms'].item()
 if 'keyatms' in keyatms: keyatms = keyatms['keyatms'].item()
 
 print("preparing dataset")
+
 # very slow on "a in keyatms"
-trainmols = [a for a in np.load('data/trainlist.mix.npy')] # if a in keyatms] # read only if key idx defined
-validmols = [a for a in np.load('data/validlist.mix.npy')] # if a in keyatms] # read only if key idx defined
+trainmols = [a for a in np.load('data/trainlist.npy')] # 15641 trains
+validmols = [a for a in np.load('data/validlist.npy')] # 1905 valids
 
-set_params = {
-    'K':K,
-    'batchsize':10,
-    'datapath':datapath,
-    'neighmode':neighmode,
-    'real_data_every_minibatch':1,#only real data at pretraining stage -- ~3 for mixed training
-}
-
-# make sure all entries in a mini batch share the same datatype
-trainset = dataset.DataSet(trainmols,**set_params)
-validset = dataset.DataSet(validmols,**set_params)
+trainset = dataset.DataSet(trainmols,**setparams)#K=K,datapath=datapath,neighmode=neighmode)
+validset = dataset.DataSet(validmols,**setparams)#K=K,datapath=datapath,neighmode=neighmode)#,pert=True)
 
 print(f"Data loading done for {len(trainmols)} train and {len(validmols)} validation molecules.")
 
 generator_params = {
-    'shuffle': False, #should presever in order to sync datatype through minibatch
-    'num_workers': 10, #1 if '-debug' in sys.argv else 10,
+    'shuffle': True,
+    'num_workers': 8, #1 if '-debug' in sys.argv else 10,
     'pin_memory': True,
     'collate_fn': collate,
     'batch_size': BATCH,
@@ -185,9 +193,10 @@ generator_params = {
 }
 train_generator = torch.utils.data.DataLoader(trainset, **generator_params)
 valid_generator = torch.utils.data.DataLoader(validset, **generator_params)
- 
+
+torch.cuda.empty_cache()
 for epoch in range(startepoch,MAXEPOCH):  
-    loss_t = {'total':[],'mae':[],'reg':[],'maeR':[]}
+    loss_t = {'total':[],'mae':[],'loss1':[],'loss2':[],'reg':[]}
     t0 = time.time()
     for i,(G1,G2,labelxyz,keyidx,info,b) in enumerate(train_generator):
         if b == 1: continue # hack!
@@ -199,42 +208,35 @@ for epoch in range(startepoch,MAXEPOCH):
         #labelidx = torch.eye(M)[keyidx].to(device) # B x K x M
         labelidx = [torch.eye(n)[idx].to(device) for n,idx in zip(G2.batch_num_nodes(),keyidx)]
         labelxyz = labelxyz.to(device)
-        realdata = (info[0]['datatype'] == 'real')
 
-        Yrec,_ = model( G1, G2, labelidx, denoise=realdata )
+        Yrec,z = model( G1, G2, labelidx)
 
         prefix = "TRAIN %s"%info[0]['name']
+        loss1, mae = structural_loss( prefix, Yrec, labelxyz ) #both are Kx3 coordinates
+        loss2 = w_spread*spread_loss( labelxyz, z, G1 )
 
-        loss, mae = custom_loss( prefix, Yrec, labelxyz ) #both are Kx3 coordinates
-        print(prefix, realdata, mae)
-
+        print(i, len(train_generator), prefix, float(loss1), float(mae), float(loss2))
         l2_reg = torch.tensor(0.).to(device)
         for param in model.parameters(): l2_reg += torch.norm(param)
-        loss = loss + w_reg*l2_reg 
+        loss = loss1 + loss2 + w_reg*l2_reg 
 
         optimizer.zero_grad()
         loss.backward() 
         optimizer.step()
         
         loss_t['total'].append(loss.cpu().detach().numpy())
+        loss_t['loss1'].append(loss1.cpu().detach().numpy())
+        loss_t['loss2'].append(loss2.cpu().detach().numpy())
         loss_t['reg'].append(l2_reg.cpu().detach().numpy())
-        
-        mae = mae.cpu().detach().numpy()
+        loss_t['mae'].append(mae.cpu().detach().numpy())
 
-        if realdata:
-            loss_t['maeR'].append(mae)
-        else:
-            loss_t['mae'].append(mae)
-
-    train_loss['total'].append(np.array(loss_t['total']))
-    train_loss['reg'].append(np.array(loss_t['reg']))
-    train_loss['mae'].append(np.array(loss_t['mae']))
-    train_loss['maeR'].append(np.array(loss_t['maeR']))
+    for key in loss_t:
+        train_loss[key].append(np.array(loss_t[key]))
     t1 = time.time()
     #print(f"Time: {t1-t0}")
 
     # validate by structure generation
-    loss_v = {'total':[],'mae':[],'maeR':[]}
+    loss_v = {'total':[],'mae':[],'loss1':[],'loss2':[]}
     with torch.no_grad():    
         for i,(G1,G2,labelxyz,keyidx,info,b) in enumerate(valid_generator):
             if b == 1: continue # hack!
@@ -245,45 +247,38 @@ for epoch in range(startepoch,MAXEPOCH):
             M = G2.ndata['x'].shape[0]
             #labelidx = torch.eye(M)[keyidx].to(device) # K x M
             labelidx = [torch.eye(n)[idx].to(device) for n,idx in zip(G2.batch_num_nodes(),keyidx)]
+                
             labelxyz = labelxyz.to(device)
-            realdata = (info[0]['datatype'] == 'real')
 
-            Yrec,A = model( G1, G2, labelidx, denoise=realdata )
-
-            if verbose:
-                generate_pose(Yrec, keyidx, G2.ndata['x'].squeeze(), atms, epoch )
-                report_attention( G1.ndata['x'].squeeze(), A, epoch )
+            Yrec,z = model( G1, G2, labelidx )
 
             prefix = "VALID "+info[0]['name']
-            loss,mae = custom_loss(prefix, Yrec, labelxyz ) #both are Kx3 coordinates
+            loss1,mae = structural_loss(prefix, Yrec, labelxyz ) #both are Kx3 coordinates
             
+            loss2 = w_spread*spread_loss( labelxyz, z, G1 )
+            loss = loss1 + loss2
             loss_v['total'].append(loss.cpu().detach().numpy())
-            mae = mae.cpu().detach().numpy()
+            loss_v['loss1'].append(loss1.cpu().detach().numpy())
+            loss_v['loss2'].append(loss2.cpu().detach().numpy())
+            loss_v['mae'].append(mae.cpu().detach().numpy())
+    
+    for key in loss_v:
+        valid_loss[key].append(np.array(loss_v[key]))
 
-            if realdata:
-                loss_v['maeR'].append(mae)
-            else:
-                loss_v['mae'].append(mae)
-            
-    valid_loss['total'].append(np.array(loss_v['total']))
-    valid_loss['mae'].append(np.array(loss_v['mae']))
-    train_loss['maeR'].append(np.array(loss_t['maeR']))
-
-    form = "Train/Valid: %3d %8.4f %8.4f %8.4f (%8.4f %8.4f / %8.4f %8.4f)"
+    form = "Train/Valid: %3d %8.4f %8.4f %8.4f (%8.4f %8.4f %8.4f %8.4f)"
     print(form%(epoch, float(np.mean(loss_t['total'])), float(np.mean(loss_v['total'])),
                 float(np.mean(loss_t['reg'])),
                 float(np.mean(loss_t['mae'])), float(np.mean(loss_v['mae'])),
-                float(np.mean(loss_t['maeR'])), float(np.mean(loss_v['maeR'])),
-    )
-          )
+                float(np.mean(loss_t['loss2'])), float(np.mean(loss_v['loss2'])),
+    ))
     
-    if np.min([np.mean(vl) for vl in valid_loss["total"]]) == np.mean(valid_loss["total"][-1]):
+    if epoch % 10 == 0:
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'train_loss': train_loss,
-            'valid_loss': valid_loss}, join("models", modelname, "best.pkl"))
+            'valid_loss': valid_loss}, join("models", modelname, "model_%d.pkl"%(epoch)))
         
     torch.save({
         'epoch': epoch,
@@ -293,3 +288,4 @@ for epoch in range(startepoch,MAXEPOCH):
         'valid_loss': valid_loss}, join("models", modelname, "model.pkl"))
    #print("Train/Valid: %3d"%epoch, float(np.mean(loss_t)), float(np.mean(loss_v)),
     #float(np.mean(mae_t)), float(np.mean(mae_v)))
+

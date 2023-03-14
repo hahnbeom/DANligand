@@ -10,7 +10,8 @@ ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "emp
 
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, targets, K, datapath='data', neighmode='dist',
-                 n=1, maxT=5.0, dcut_lig=5.0, pert=False, noiseP = 0.8):
+                 n=1, maxT=5.0, dcut_lig=5.0, pert=False, noiseP = 0.8, topk=8,
+                 mixkey=False):
         
         self.targets = targets
         self.datapath = datapath
@@ -20,8 +21,9 @@ class DataSet(torch.utils.data.Dataset):
         self.dcut_lig = dcut_lig
         self.maxT = maxT
         self.pert = pert
-        self.topk = 8
+        self.topk = topk
         self.noiseP = noiseP
+        self.mixkey = mixkey
         
         self.Grecs = []
         self.Gligs = []
@@ -66,35 +68,29 @@ class DataSet(torch.utils.data.Dataset):
             Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig,mode=self.neighmode,top_k=self.topk)
 
         except:
-            # print("failed to read %s"%target)
+            print("failed to read %s"%target)
             return 
         
         keyidx = identify_keyidx(target, Glig, atms, self.datapath, self.K)
         if not keyidx:
-            #print("%4d/%4d: key name violation %s"%(index,len(self.targets),target))
+            print("%4d/%4d: key name violation %s"%(index,len(self.targets),target))
             return 
 
-        keyidx = keyidx[:self.K]
-        
-        '''
-        if target in ['bace1r']:
-            natmol2 = '%s/bace1.ligand.mol2'%self.datapath
-            Gnat,_ = ligand_graph_from_mol2(natmol2,self.K,dcut=self.dcut_lig)
+        if self.mixkey:
+            keyidx = np.random.choice(keyidx,self.K)
         else:
-            Gnat = Glig
-        '''
+            keyidx = keyidx[:self.K]
+        
         Gnat = Glig
             
         # hard-coded
         keyidx_nat = keyidx
         xyzlig_nat = Gnat.ndata['x']
             
-        #label = np.random.permutation(keyidx)[:self.K]
-        label = keyidx_nat[:self.K]
+        label = keyidx_nat
         labelxyz = xyzlig_nat[label] # K x 3
 
         if self.pert:
-    
             com = torch.mean(Glig.ndata['x'],axis=0)
             q = torch.rand(4) # random rotation
             R = torch.tensor(Rotation.from_quat(q).as_matrix()).float()
