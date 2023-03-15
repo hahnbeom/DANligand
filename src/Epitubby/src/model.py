@@ -32,8 +32,9 @@ class MyModel(nn.Module):
         collapse_esm.append(nn.Linear( mid1, mid2 ))
         
         linear_comb.append(nn.Linear( mid3, num_channels ))
-        #linear_comb.append()
-
+        for _ in range(n_layers_frag):
+            linear_comb.append( nn.Linear( num_channels, num_channels ) )
+        
         self.collapse_esm = nn.ModuleList( collapse_esm )
         self.linear_comb = nn.ModuleList( linear_comb )
 
@@ -87,22 +88,35 @@ class MyModel(nn.Module):
         for layer in self.linear_comb:
             ys = layer(ys)
 
+        x = torch.nn.functional.layer_norm(x,x.shape)
+        ys = torch.nn.functional.layer_norm(ys,ys.shape)
+            
         ps = []
         i = 0
         for n,y in zip(G_rec.batch_num_nodes(),ys):
             A = torch.einsum('id,jd->ij', x[i:i+n,:], y)
-            A = torch.softmax(A,dim=1) #sum-up to 1 over dim=1 (==fragment res index)
-            #print(A.shape, torch.sum(A,dim=1))
-        
+
+            '''
+            A = torch.softmax(A,dim=0) #sum-up to 1 over dim=0 (==fragment res index)
+
             # pool over receptor dim
             #"per-recres fragP" 
             p = torch.einsum('ij,jd->id', A,y)
+            p = self.final_linear(p) # shrink to 1-dim; replace pooling
+            '''
+
+            ## m4
+            '''
+            A = torch.nn.functional.layer_norm(A,A.shape) #values normalized around 0
+            p = torch.sum(A,dim=1) #better maxpool?
+            '''
+
+            ## m5
+            p = torch.nn.functional.max_pool1d(A,A.shape[-1]).squeeze()
+            p = 1.0/(1.0+torch.exp(-(p-3.0))) 
+            #p = torch.sigmoid(p).squeeze()
             ps.append(p)
             i += n
-
-        ps = torch.stack(ps,dim=0)
-        ps = self.final_linear(ps) # shrink to 1-dim; replace pooling
-        ps = torch.sigmoid(ps).squeeze()
 
         return ps
 

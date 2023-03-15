@@ -6,38 +6,40 @@ import os
 
 def collate(samples):
     #samples should be G,info
-    valid = [v[1] for v in samples if v[1]]
+    valid = [v for v in samples if v[1] and v[1] != None]
     if len(valid) == 0:
         return False, False, {}
     
-    #try:
-    if True:
+    try:
+    #if True:
         Gs = []
         frag_emb = []
         info = {key:[] for key in samples[0][2].keys()}
         
-        for s in samples:
+        for s in valid:
             frag_emb.append(s[0])
             Gs.append(s[1])
             for key in s[2]:
                 info[key].append(s[2][key])
 
-        info['label'] = torch.stack(info['label'],dim=0)
-        
         bG = dgl.batch(Gs)
         frag_emb = torch.stack(frag_emb,dim=0)
         
+        #info['label'] = torch.stack(info['label'],dim=0)
+        
         return frag_emb, bG, info
 
-    #except:
-    else:
+    except:
+        #print(Gs)
+    #else:
         print("failed collation")
-        return None, {}
+        return None, None, {}
 
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, targets, datapath='/ml/motifnet/HmapPPDB/trainable/',
                  neighmode='topk',
                  dcut=12.0, top_k=12,
+                 same_frag=False,
                  debug=False):
         
         self.targets = targets
@@ -45,6 +47,7 @@ class DataSet(torch.utils.data.Dataset):
         self.neighmode = neighmode
         self.dcut = dcut
         self.top_k = 8
+        self.same_frag = same_frag
         self.debug = debug
             
     def __len__(self):
@@ -57,8 +60,14 @@ class DataSet(torch.utils.data.Dataset):
         # 1. random pick single entry from the interface
         data = np.load(interface_npz,allow_pickle=True)
         frags = data['frags']
-        ifrag = np.random.randint(len(frags))
-        
+        if len(frags) == 0:
+            return False, False, {}
+
+        if self.same_frag:
+            ifrag = 0
+        else:
+            ifrag = np.random.randint(len(frags))
+
         frag = frags[ifrag] #rc
         aas_frag = data['frag_aas'][ifrag]
         
@@ -88,7 +97,7 @@ class DataSet(torch.utils.data.Dataset):
         # add dummy embedding at the end
         rec_s = np.concatenate([rec_s,np.zeros((1,rec_s.shape[-1]))])
         #rec_z = np.concatenate([rec_z,np.zeros((1,rec_s.shape[-1]))])
-        frag_s = np.concatenate([rec_s,np.zeros((1,frag_s.shape[-1]))])
+        frag_s = np.concatenate([frag_s,np.zeros((1,frag_s.shape[-1]))])
         #frag_z = np.concatenate([frag_z,np.zeros((1,frag_z.shape[-1]))])
 
         ## 3. retrieve interface label definition
@@ -104,7 +113,10 @@ class DataSet(torch.utils.data.Dataset):
 
         aas_rec = np.array([aa1index.index(aas_rec[rc]) for rc in rc_rec],dtype=int)
         ## 4. build rec_graph & frag_feature
-        
+
+        if self.debug:
+            print("info: ", self.targets[index], frag_chain, rec_chain, frag, frag_s.shape)
+            
         try:
             G_rec = self.make_graph(xyz_rec, aas_rec, rec_s[iemb_rec]) #
             
@@ -114,7 +126,7 @@ class DataSet(torch.utils.data.Dataset):
             pos_enc[:,1] = np.cos(np.arange(1000,1000+aas_frag.shape[0]))
             pos_enc[:,2] = np.sin(np.arange(1000,1000+aas_frag.shape[0])/10000**(1.0/32.0))
             pos_enc[:,3] = np.cos(np.arange(1000,1000+aas_frag.shape[0])/10000**(1.0/32.0))
-            
+
             frag_emb = np.concatenate([aas_frag,pos_enc,frag_s[iemb_frag]],axis=1)
             frag_emb = torch.tensor(frag_emb)
             
@@ -124,6 +136,7 @@ class DataSet(torch.utils.data.Dataset):
                     'label':label}
         except:
             print("failed reading", self.targets[index])
+            
             if self.debug:
                 G_rec = self.make_graph(xyz_rec, aas_rec, rec_s[iemb_rec]) #
 
@@ -158,7 +171,7 @@ class DataSet(torch.utils.data.Dataset):
         G = dgl.graph((u,v))
         G.ndata['attr'] = torch.tensor(nodefeats).float()
         G.ndata['x'] = torch.tensor(xyz).float()[:,None,:]
-        G.edata['attr'] = torch.tensor(d_[:,None]).float()
+        G.edata['attr'] = d_[:,None].float()
         G.edata['rel_pos'] = dX[:,u,v].float()[0]
 
         return G
