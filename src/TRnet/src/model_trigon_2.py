@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
 from src.other_utils import to_dense_batch
 from src.myutils import make_batch_vec
+import torch.utils.checkpoint as checkpoint
 #from equivariant_attention.modules import get_basis_and_r, GSE3Res, GNormBias
 #from equivariant_attention.modules import GConvSE3, GNormSE3
 #from equivariant_attention.fibers import Fiber
@@ -88,16 +88,12 @@ class SE3TransformerWrapper(nn.Module):
         self.protein_to_compound_list = nn.ModuleList([TriangleProteinToCompound_v2(embedding_channels=embedding_channels, c=c) for _ in range(n_trigonometry_module_stack)])
         self.triangle_self_attention_list = nn.ModuleList([TriangleSelfAttentionRowWise(embedding_channels=embedding_channels, c=c) for _ in range(n_trigonometry_module_stack)])
         
-    def forward(self, Grec, Glig, labelidx):
+    def forward(self, Grec, Glig, labelidx, use_checkpoint=False):
         size1 = Grec.batch_num_nodes()
         size2 = Glig.batch_num_nodes()
 
         recxyz = Grec.ndata['x'].squeeze().float()
         ligxyz = Glig.ndata['x'].squeeze().float()
-        # print(Grec)
-        # print(Glig)
-
-        # labelidx = torch.tensor(labelidx)
 
         node_features_rec = {'0':Grec.ndata['attr'][:,:,None].float()}#,'1':Grec.ndata['x'].float()}
         edge_features_rec = {'0':Grec.edata['attr'][:,:,None].float()}
@@ -109,9 +105,15 @@ class SE3TransformerWrapper(nn.Module):
             node_features_rec['1'] = Grec.ndata['x'].float()
             node_features_lig['1'] = Glig.ndata['x'].float()
 
-        hs_rec = self.se3_rec(Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
-        hs_lig = self.se3_lig(Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
+        ## set3 part
+        if use_checkpoint:
+            hs_rec = checkpoint.checkpoint(self.se3_rec, Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
+            hs_lig = checkpoint.checkpoint(self.se3_lig, Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
+        else:
+            hs_rec = self.se3_rec(Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
+            hs_lig = self.se3_lig(Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
 
+        ## input prep to trigonometry attention
         hs_rec = torch.squeeze(hs_rec) # N x d
         hs_lig = torch.squeeze(hs_lig) # M x d
 
@@ -125,12 +127,11 @@ class SE3TransformerWrapper(nn.Module):
 
         hs_rec = self.Wrs(hs_rec)
         hs_lig = self.Wls(hs_lig)
-
+        
         label_to_batch = labelidx[0].transpose(1,0)
 
         for i in range(1,len(size1)):
             label_to_batch = torch.cat((label_to_batch,labelidx[i].transpose(1,0)),dim=0)
-
 
         label_batched, label_mask = to_dense_batch(label_to_batch, batchvec_lig)
         label_batched = label_batched.transpose(2,1) # b x K x j
@@ -150,29 +151,32 @@ class SE3TransformerWrapper(nn.Module):
         z = torch.einsum('bnd,bmd->bnmd', hs_rec_batched, hs_lig_batched )
         z_mask = torch.einsum('bn,bm->bnm',hs_rec_mask, hs_lig_mask )
 
-        rec_pair = get_pair_dis_one_hot(r_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d)
-        lig_pair = get_pair_dis_one_hot(l_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d)
-        
-        rec_pair = rec_pair.float()
-        lig_pair = lig_pair.float()
+        rec_pair = get_pair_dis_one_hot(r_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d).float()
+        lig_pair = get_pair_dis_one_hot(l_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d).float()
 
+        # trigonometry part
         for i_module in range(self.n_trigonometry_module_stack):
-            z = z + self.dropout(self.protein_to_compound_list[i_module](z, rec_pair, lig_pair, z_mask.unsqueeze(-1)))
-            z = z + self.dropout(self.triangle_self_attention_list[i_module](z, z_mask))
+            if use_checkpoint:
+                zadd = checkpoint.checkpoint(self.protein_to_compound_list[i_module], z, rec_pair, lig_pair, z_mask.unsqueeze(-1))
+                z = z + self.dropout(zadd)
+                zadd = checkpoint.checkpoint(self.triangle_self_attention_list[i_module], z, z_mask)
+                z = z + self.dropout(zadd)
+            else:
+                zadd = self.protein_to_compound_list[i_module](z, rec_pair, lig_pair, z_mask.unsqueeze(-1))
+                z = z + self.dropout(zadd)
+                zadd = self.triangle_self_attention_list[i_module](z, z_mask)
+                z = z + self.dropout(zadd)
+                
             z = self.tranistion(z)
-            
+
+        # final processing
         z = self.lastlinearlayer(z).squeeze(-1) #real17 ext15
         z = masked_softmax(self.scale*z, mask=z_mask, dim = 1)
 
         Yrec_s = torch.einsum("bij,bic->bjc",z,r_coords_batched) # "Weighted sum":  i x j , i x 3 -> j x 3
 
         Yrec_s = [l for l in Yrec_s]
-        # print(Yrec_s)
-
-        
         Yrec_s = torch.stack(Yrec_s,dim=0)
 
-        #print(Yrec_s.shape)
-        # exit()
         return Yrec_s, z #B x ? x ?
 

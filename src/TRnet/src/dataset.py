@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import dgl
-import sys,copy
+import sys,copy,os
 from scipy.spatial.transform import Rotation
 import time
 import random
@@ -10,8 +10,8 @@ ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "emp
 
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, targets, K, datapath='data', neighmode='dist',
-                 n=1, maxT=5.0, dcut_lig=5.0, pert=False, noiseP = 0.8, topk=8,
-                 mixkey=False):
+                 n=1, maxT=5.0, dcut_lig=5.0, pert=False, noiseP = 0.8, topk=8, maxnode=1500,
+                 mixkey=False, dropH=False):
         
         self.targets = targets
         self.datapath = datapath
@@ -24,9 +24,11 @@ class DataSet(torch.utils.data.Dataset):
         self.topk = topk
         self.noiseP = noiseP
         self.mixkey = mixkey
-        
+
+        self.maxnode = maxnode
         self.Grecs = []
         self.Gligs = []
+        self.dropH = dropH
         '''
         for i,target in enumerate(targets):
             motifnetnpz = self.datapath+'/'+target+'.score.npz'
@@ -62,26 +64,36 @@ class DataSet(torch.utils.data.Dataset):
         motifnetnpz = self.datapath+'/'+target+'.score.npz'
         mol2 = self.datapath+'/'+target+'.ligand.mol2'
 
-        Grec,Glig = False,False
+        confmol2 = self.datapath+'/'+target+'.conformers.mol2'
+
+        if not self.pert or not os.path.exists(confmol2):
+            confmol2 = None
+
         try:
-            Grec = receptor_graph_from_motifnet(motifnetnpz, self.K, mode=self.neighmode, top_k=self.topk)
-            Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig,mode=self.neighmode,top_k=self.topk)
+            Grec = receptor_graph_from_motifnet(motifnetnpz, self.K, mode=self.neighmode, top_k=self.topk, maxnode=self.maxnode)
+            Gnat,Glig,atms = ligand_graph_from_mol2(mol2,self.K,
+                                                    dcut=self.dcut_lig,
+                                                    read_alt_conf=confmol2,
+                                                    mode=self.neighmode,top_k=self.topk,
+                                                    drop_H=self.dropH)
+            if not Grec:
+                print("skip %s for size cut"%(target, self.maxnode))
+                return
 
         except:
             print("failed to read %s"%target)
-            return 
-        
+            return
+
         keyidx = identify_keyidx(target, Glig, atms, self.datapath, self.K)
         if not keyidx:
             print("%4d/%4d: key name violation %s"%(index,len(self.targets),target))
             return 
 
         if self.mixkey:
-            keyidx = np.random.choice(keyidx,self.K)
+            keyidx = np.random.choice(keyidx,self.K,replace=False)
         else:
             keyidx = keyidx[:self.K]
-        
-        Gnat = Glig
+        keyatms = np.array(atms)[keyidx]
             
         # hard-coded
         keyidx_nat = keyidx
@@ -90,6 +102,7 @@ class DataSet(torch.utils.data.Dataset):
         label = keyidx_nat
         labelxyz = xyzlig_nat[label] # K x 3
 
+        '''
         if self.pert:
             com = torch.mean(Glig.ndata['x'],axis=0)
             q = torch.rand(4) # random rotation
@@ -98,20 +111,22 @@ class DataSet(torch.utils.data.Dataset):
 
             xyz = torch.matmul(Glig.ndata['x']-com,R) + com + t
             Glig.ndata['x'] = xyz
+        '''
 
-        info = {'name':target, 'atms':atms}
+        info = {'name':target, 'atms':atms, 'keyatms':keyatms}
 
         noise_or_not = random.random() < self.noiseP
         
         if noise_or_not:
             Glig, randoms = give_noise_to_lig(Glig)
-
-
+            
         return Grec, Glig, labelxyz, keyidx, info #label
 
-def receptor_graph_from_motifnet(npz,K,dcut=1.8,mode='dist',top_k=8,debug=False): # max 26 edges
+def receptor_graph_from_motifnet(npz,K,dcut=1.8,mode='dist',top_k=8,maxnode=1500,debug=False): # max 26 edges
     data = np.load(npz,allow_pickle=True)
     grids = data['grids']
+    if grids.shape[0] > maxnode:
+        return False
     prob = data['P']
 
     # print(prob[1:])
@@ -177,7 +192,7 @@ def receptor_graph_from_motifnet(npz,K,dcut=1.8,mode='dist',top_k=8,debug=False)
     G.edata['rel_pos'] = dX[:,u,v].float()[0]
     return G
     
-def read_mol2(mol2):
+def read_mol2(mol2,drop_H=False):
     read_cont = 0
     qs = []
     elems = []
@@ -209,8 +224,6 @@ def read_mol2(mol2):
             if elem == 'A' or elem == 'B' :
                 elem = words[5].split('.')[0]
             
-            
-            
             if elem not in ELEMS:
                 # print('ERROR: %s, unknown elem type: %s'%(mol2,elem))
                 # print(words)
@@ -238,13 +251,40 @@ def read_mol2(mol2):
             nneighs[i][l] += 1.0
 
     # drop hydrogens
-    #nonHid = [i for i,a in enumerate(elems) if a != 'H']
-    nonHid = [i for i,a in enumerate(elems)]
+    if drop_H:
+        nonHid = [i for i,a in enumerate(elems) if a != 'H']
+    else:
+        nonHid = [i for i,a in enumerate(elems)]
 
     bonds = [[i,j] for i,j in bonds if i in nonHid and j in nonHid]
     borders = [b for b,ij in zip(borders,bonds) if ij[0] in nonHid and ij[1] in nonHid]
+
+    return np.array(elems)[nonHid], np.array(qs)[nonHid], bonds, borders, np.array(xyzs)[nonHid], np.array(nneighs)[nonHid], list(np.array(atms)[nonHid])
+
+
+def read_mol2s_xyzonly(mol2):
+    read_cont = 0
+    xyzs = []
+    atms = []
     
-    return np.array(elems)[nonHid], np.array(qs)[nonHid], bonds, borders, np.array(xyzs)[nonHid], np.array(nneighs)[nonHid], atms #np.array(atms)[nonHid]
+    for l in open(mol2):
+        if l.startswith('@<TRIPOS>ATOM'):
+            read_cont = 1
+            xyzs.append([])
+            atms.append([])
+            continue
+        if l.startswith('@<TRIPOS>BOND') or l.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+            read_cont = 2
+            continue
+
+        words = l[:-1].split()
+        if read_cont == 1:
+            is_H = (words[1][0] == 'H')
+            if not is_H:
+                atms[-1].append(words[1])
+                xyzs[-1].append([float(words[2]),float(words[3]),float(words[4])]) 
+
+    return np.array(xyzs), atms
 
 def normalize_distance(D,maxd=5.0):
     d0 = 0.5*maxd #center
@@ -271,24 +311,34 @@ def find_dist_neighbors(dX,dcut,mode='dist',top_k=8):
         
     return u,v,D[0]
     
-def ligand_graph_from_mol2(mol2,K,dcut,mode='dist',top_k=8):
+def ligand_graph_from_mol2(mol2,K,dcut,read_alt_conf=None,mode='dist',top_k=8,drop_H=False):
     t0 = time.time()
+    xyz_alt = []
     try:
-        args = read_mol2(mol2)
+        if read_alt_conf != None:
+            xyz_alt,atms = read_mol2s_xyzonly(read_alt_conf)
+            
+        args = read_mol2(mol2,drop_H=drop_H)
     except:
-        return False, False
+        return False, False, False
         
     if not args:
-        return False, False
-    elems, qs, bonds, borders, xyz, nneighs, atms = args
+        return False, False, False
+    elems, qs, bonds, borders, xyz_nat, nneighs, atms = args
+
+    if len(xyz_alt) > 1:
+        ialt = min(np.random.randint(len(xyz_alt)),len(xyz_alt)-1)
+        xyz = torch.tensor(xyz_alt[ialt]).float()
+    else:
+        xyz = xyz_nat
 
     X = torch.tensor(xyz[None,]) #expand dimension
     dX = torch.unsqueeze(X,1) - torch.unsqueeze(X,2)
     u,v,d = find_dist_neighbors(dX,dcut=dcut,mode=mode,top_k=top_k)
     obt  = []
     elems = [ELEMS.index(a) for a in elems]
-    
-    G = dgl.graph((u,v))
+
+    Glig = dgl.graph((u,v))
 
     # normalize nneigh
     ns = np.sum(nneighs,axis=1)[:,None]+0.01
@@ -322,21 +372,24 @@ def ligand_graph_from_mol2(mol2,K,dcut,mode='dist',top_k=8):
     edata = torch.eye(5)[border_] #0~3
     edata[:,-1] = normalize_distance(d_) #4
 
-    G.ndata['attr'] = torch.tensor(obt).float()
-    G.ndata['x'] = torch.tensor(xyz).float()[:,None,:]
-    G.edata['attr'] = edata
-    G.edata['rel_pos'] = dX[:,u,v].float()[0]
+    Glig.ndata['attr'] = torch.tensor(obt).float()
+    Glig.ndata['x'] = torch.tensor(xyz).float()[:,None,:]
+    Glig.edata['attr'] = edata
+    Glig.edata['rel_pos'] = dX[:,u,v].float()[0]
     
     #print(f"extracted {edata.shape} edge & {obt.shape} node features")
     
-    G.ndata['Y'] = torch.zeros(obt.shape[0],3) # placeholder
+    Glig.ndata['Y'] = torch.zeros(obt.shape[0],3) # placeholder
 
     #G  = dgl.add_self_loop(G)
     #G = dgl.remove_self_loop(G)
     t3 = time.time()
-    #print("data loading %3d %.1f %.1f %.1f"%(G.number_of_nodes(), t1-t0, t2-t1, t3-t2))
+    #print("data loading %3d %.1f %.1f %.1f"%(Gnat.number_of_nodes(), t1-t0, t2-t1, t3-t2))
 
-    return G,atms    
+    Gnat = copy.deepcopy(Glig)
+    Gnat.ndata['x'] = torch.tensor(xyz_nat).float()[:,None,:]
+
+    return Gnat,Glig,atms    
 
 def identify_keyidx(target, Glig, atms, datapath, K):
     ## find key idx as below -- TODO

@@ -34,17 +34,18 @@ setparams = {'K':K,
              'datapath':datapath,
              'neighmode':'topk',
              'topk'  : 16,
-             'mixkey': True
+             'mixkey': True,
+             'maxnode': 1300 #important for trigonmetry pair using BNNc dimension; this limits to ~16G when stack=5,c=32,b=2
              }
 
 modelparams = {'num_layers_lig':3,
                'num_layers_rec':2,
-               'num_channels':16, #within se3
+               'num_channels':16, #within se3; adds small memory (~n00 MB?)
                'l1_in_features':0,
                'l0_out_features':32, #at Xatn
                'n_heads_se3':4,
                'embedding_channels':32,
-               'c':32,
+               'c':32, #actual channel size within trigon attn?
                'n_trigonometry_module_stack':5, 
                'div':4,
                'K':K,
@@ -69,12 +70,14 @@ def collate(samples):
         label.append(torch.tensor(s[3]))
         info.append(s[4])
 
-    if len(labelxyz) == 1:
+    if len(labelxyz) == 0:
+        return None, None, None, None, None, 0
+    elif len(labelxyz) == 1:
         labelxyz = torch.cat(labelxyz)[None,...]
     else:
         labelxyz = torch.stack(labelxyz,dim=0).squeeze()
     label = torch.stack(label,dim=0).squeeze()
-
+ 
     a = dgl.batch(Grec)
     b = dgl.batch(Glig)
 
@@ -199,7 +202,9 @@ for epoch in range(startepoch,MAXEPOCH):
     loss_t = {'total':[],'mae':[],'loss1':[],'loss2':[],'reg':[]}
     t0 = time.time()
     for i,(G1,G2,labelxyz,keyidx,info,b) in enumerate(train_generator):
-        if b == 1: continue # hack!
+        if b <= 1: continue # hack!
+
+        if G1 == None: continue
             
         G1 = G1.to(device) # rec
         G2 = G2.to(device) # lig
@@ -209,13 +214,13 @@ for epoch in range(startepoch,MAXEPOCH):
         labelidx = [torch.eye(n)[idx].to(device) for n,idx in zip(G2.batch_num_nodes(),keyidx)]
         labelxyz = labelxyz.to(device)
 
-        Yrec,z = model( G1, G2, labelidx)
+        Yrec,z = model( G1, G2, labelidx, True)
 
         prefix = "TRAIN %s"%info[0]['name']
         loss1, mae = structural_loss( prefix, Yrec, labelxyz ) #both are Kx3 coordinates
         loss2 = w_spread*spread_loss( labelxyz, z, G1 )
 
-        print(i, len(train_generator), prefix, float(loss1), float(mae), float(loss2))
+        print(epoch, i, len(train_generator), prefix, float(loss1), float(mae), float(loss2))
         l2_reg = torch.tensor(0.).to(device)
         for param in model.parameters(): l2_reg += torch.norm(param)
         loss = loss1 + loss2 + w_reg*l2_reg 
@@ -241,6 +246,8 @@ for epoch in range(startepoch,MAXEPOCH):
         for i,(G1,G2,labelxyz,keyidx,info,b) in enumerate(valid_generator):
             if b == 1: continue # hack!
             
+            if G1 == None: continue
+            
             G1 = G1.to(device)
             G2 = G2.to(device)
             
@@ -250,7 +257,7 @@ for epoch in range(startepoch,MAXEPOCH):
                 
             labelxyz = labelxyz.to(device)
 
-            Yrec,z = model( G1, G2, labelidx )
+            Yrec,z = model( G1, G2, labelidx, False )
 
             prefix = "VALID "+info[0]['name']
             loss1,mae = structural_loss(prefix, Yrec, labelxyz ) #both are Kx3 coordinates

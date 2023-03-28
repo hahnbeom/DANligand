@@ -69,7 +69,9 @@ def collate(samples):
         label.append(torch.tensor(s[3]))
         info.append(s[4])
 
-    if len(labelxyz) == 1:
+    if len(labelxyz) == 0:
+        return None, None, None, None, None, 0
+    elif len(labelxyz) == 1:
         labelxyz = torch.cat(labelxyz)[None,...]
     else:
         labelxyz = torch.stack(labelxyz,dim=0).squeeze()
@@ -85,15 +87,17 @@ def structural_loss(prefix, Yrec, Ylig):
 
     dY = Yrec-Ylig # BxKx3
     loss1 = torch.sum(dY*dY,dim=1)
-    
-    N = Yrec.shape[0]
+
+    N = Yrec.shape[0] # batch
     loss1_sum = torch.sum(loss1)/N
     meanD = torch.mean(torch.sqrt(loss1))
 
     #for k in range(K):
     #    print("%-10s %1d"%(prefix, k), loss[k], Yrec[k], Ylig[k])
-        
-    return loss1_sum, meanD
+
+    dY = torch.sqrt(torch.sum(dY*dY,dim=-1)) #BxK, peratm-dist
+    
+    return loss1_sum, meanD, dY
 
 def spread_loss(Ylig, A, G, sig=2.0): #label(B x K x 3), attention (B x Nmax x K)
     loss2 = torch.tensor(0.0)
@@ -161,13 +165,15 @@ print("preparing dataset")
 
 # very slow on "a in keyatms"
 validmols = [a for a in np.load('data/validlist.npy')] # 1905 valids
+#validmols = [a for a in np.load('data/trainlist.npy')] # 1905 valids
+validmols.sort()
 
 validset = dataset.DataSet(validmols,**setparams)#K=K,datapath=datapath,neighmode=neighmode)#,pert=True)
 
 print(f"Data loading done for {len(validmols)} validation molecules.")
 
 generator_params = {
-    'shuffle': True,
+    'shuffle': False,
     'num_workers': 8, #1 if '-debug' in sys.argv else 10,
     'pin_memory': True,
     'collate_fn': collate,
@@ -182,7 +188,7 @@ torch.cuda.empty_cache()
 loss_v = {'total':[],'mae':[],'loss1':[],'loss2':[]}
 with torch.no_grad():    
     for i,(G1,G2,labelxyz,keyidx,info,b) in enumerate(valid_generator):
-        if b == 1: continue # hack!
+        if b <= 1: continue # hack!
         
         G1 = G1.to(device)
         G2 = G2.to(device)
@@ -196,7 +202,7 @@ with torch.no_grad():
         Yrec,z = model( G1, G2, labelidx )
 
         prefix = "VALID "+info[0]['name']
-        loss1,mae = structural_loss(prefix, Yrec, labelxyz ) #both are Kx3 coordinates
+        loss1,mae,peratm = structural_loss(prefix, Yrec, labelxyz ) #both are Kx3 coordinates
             
         loss2 = w_spread*spread_loss( labelxyz, z, G1 )
         loss = loss1 + loss2
@@ -204,17 +210,28 @@ with torch.no_grad():
         loss_v['loss1'].append(loss1.cpu().detach().numpy())
         loss_v['loss2'].append(loss2.cpu().detach().numpy())
         loss_v['mae'].append(mae.cpu().detach().numpy())
-    
-        if VERBOSE:
-            print(pnames, float(loss), float(mae), G1.ndata['x'].shape)
-            com = torch.tensor(com[0])
-            X = Grec.ndata['x'].squeeze() 
 
-            out = open(pnames[0]+'.%d.pdb','w')
-            form = 'ATOM  %5d  %3s%4s A%4d    %8.3f%8.3f%8.3f  1.00 %4.2f\n'
-            for a,x in zip(A,X):
-                aname = ['Zn','Mg','Fe','Cl']
-                for i in range(4):
-                    out.write(form%(i,aname[i],aname[i],i,x[0],x[1],x[2],a))
-            out.close()
+        pnames = [a['name'] for a in info]
+
+        if VERBOSE:
+            keyatms = [a['keyatms'] for a in info]
+            print(pnames, float(loss), float(mae), G1.ndata['x'].shape, keyatms)
+            X = G1.ndata['x'].squeeze() 
+
+            b = 0
+            for i,(p,n,a,key,d) in enumerate(zip(pnames,G1.batch_num_nodes(),z,keyatms,peratm)):
+                x = X[b:b+n]
+                out = open(p+'.d%3.1f.keyatm.pdb'%(torch.mean(d)),'w')
+                form = 'ATOM  %5d %4s%4s A%4d    %8.3f%8.3f%8.3f  1.00 %4.2f\n'
+                
+                for j,x_ in enumerate(x):
+                    out.write(form%(j,'H','H',j,x_[0],x_[1],x_[2],0.0))
+                    
+                aname = ['F','Cl','Br','I']
+                for k in range(4):
+                    for j,x_ in enumerate(x):
+                        if a[j,k] > 0.1:
+                            out.write(form%(j,key[k],aname[k],j,x_[0],x_[1],x_[2],a[j,k]))
+                out.close()
+                b += n
                 
