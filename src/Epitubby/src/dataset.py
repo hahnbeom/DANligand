@@ -151,6 +151,9 @@ class DataSet(torch.utils.data.Dataset):
                 
             return False, False, {}
 
+        if G_rec.number_of_nodes() < 50:
+            return False, False, {}
+
         return frag_emb, G_rec, info
 
     def make_graph(self, xyz, aas, s):
