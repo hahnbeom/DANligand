@@ -11,7 +11,7 @@ ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "emp
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, targets, K, datapath='data', neighmode='dist',
                  n=1, maxT=5.0, dcut_lig=5.0, pert=False, noiseP = 0.8, topk=8, maxnode=1500,
-                 mixkey=False, dropH=False):
+                 mixkey=False, dropH=False, version=1):
         
         self.targets = targets
         self.datapath = datapath
@@ -29,30 +29,7 @@ class DataSet(torch.utils.data.Dataset):
         self.Grecs = []
         self.Gligs = []
         self.dropH = dropH
-        '''
-        for i,target in enumerate(targets):
-            motifnetnpz = self.datapath+'/'+target+'.score.npz'
-            Grec = receptor_graph_from_motifnet(motifnetnpz, K)
-            self.Grecs.append(Grec)
-
-            mol2 = self.datapath+'/'+target+'.ligand.mol2'
-            
-            Glig,atms = ligand_graph_from_mol2(mol2,self.K,dcut=self.dcut_lig)
-            if not Glig:
-                print("failed to read %s"%target)
-                continue
-
-            
-            keyidx = identify_keyidx(target, Glig, atms, datapath)
-            if not keyidx:
-                print("%4d/%4d: key name violation %s"%(i,len(targets),target))
-                continue
-
-            keyidx = keyidx[:self.K]
-                
-            self.Gligs.append((Glig,keyidx))
-        '''
-            
+        self.version = version
             
     def __len__(self):
         return self.n*len(self.targets)
@@ -61,13 +38,24 @@ class DataSet(torch.utils.data.Dataset):
         imol = index%len(self.targets)
         target = self.targets[imol]
 
-        motifnetnpz = self.datapath+'/'+target+'.score.npz'
-        mol2 = self.datapath+'/'+target+'.ligand.mol2'
-
-        confmol2 = self.datapath+'/'+target+'.conformers.mol2'
+        if self.version == 1:
+            motifnetnpz = self.datapath+'/'+target+'.score.npz'
+            mol2 = self.datapath+'/'+target+'.ligand.mol2'
+            confmol2 = self.datapath+'/'+target+'.conformers.mol2'
+        elif self.version == 2:
+            if '.' in target:
+                motifnetnpz = self.datapath+'/biolip/'+target+'.score.npz'
+            else:
+                motifnetnpz = self.datapath+'/PDBbind/'+target+'.score.npz'
+                
+            mol2 = self.datapath+'/mol2/'+target+'.ligand.mol2'
+            confmol2 = self.datapath+'/conformers/'+target+'.conformers.mol2'
 
         if not self.pert or not os.path.exists(confmol2):
             confmol2 = None
+        if not os.path.exists(motifnetnpz):
+            print(f"{motifnetnpz} does not exist")
+            return 
 
         try:
             Grec = receptor_graph_from_motifnet(motifnetnpz, self.K, mode=self.neighmode, top_k=self.topk, maxnode=self.maxnode)
@@ -79,6 +67,8 @@ class DataSet(torch.utils.data.Dataset):
             if not Grec:
                 print("skip %s for size cut"%(target, self.maxnode))
                 return
+            elif not atms:
+                print("skip %s for ligand read failure"%(target), mol2)
 
         except:
             print("failed to read %s"%target)
@@ -210,6 +200,9 @@ def read_mol2(mol2,drop_H=False):
             continue
         if l.startswith('@<TRIPOS>SUBSTRUCTURE'):
             break
+        if l.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+            read_cont = 0
+            continue
 
         words = l[:-1].split()
         if read_cont == 1:
@@ -259,7 +252,7 @@ def read_mol2(mol2,drop_H=False):
     bonds = [[i,j] for i,j in bonds if i in nonHid and j in nonHid]
     borders = [b for b,ij in zip(borders,bonds) if ij[0] in nonHid and ij[1] in nonHid]
 
-    return np.array(elems)[nonHid], np.array(qs)[nonHid], bonds, borders, np.array(xyzs)[nonHid], np.array(nneighs)[nonHid], list(np.array(atms)[nonHid])
+    return np.array(elems)[nonHid], np.array(qs)[nonHid], bonds, borders, np.array(xyzs)[nonHid], np.array(nneighs,dtype=float)[nonHid], list(np.array(atms)[nonHid])
 
 
 def read_mol2s_xyzonly(mol2):
@@ -273,7 +266,11 @@ def read_mol2s_xyzonly(mol2):
             xyzs.append([])
             atms.append([])
             continue
-        if l.startswith('@<TRIPOS>BOND') or l.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+        if l.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+            read_cont = 0
+            continue
+        
+        if l.startswith('@<TRIPOS>BOND'): 
             read_cont = 2
             continue
 
@@ -320,6 +317,8 @@ def ligand_graph_from_mol2(mol2,K,dcut,read_alt_conf=None,mode='dist',top_k=8,dr
             
         args = read_mol2(mol2,drop_H=drop_H)
     except:
+        args = read_mol2(mol2,drop_H=drop_H)
+        print("failed to read mol2", mol2)
         return False, False, False
         
     if not args:
@@ -364,6 +363,7 @@ def ligand_graph_from_mol2(mol2,K,dcut,read_alt_conf=None,mode='dist',top_k=8,dr
     d_ = torch.zeros(u.shape[0])
     t1 = time.time()
 
+    #print(mol2, bonds, len(borders), border_.shape)
     for k,(i,j) in enumerate(zip(u,v)):
         border_[k] = borders[ib[i,j]]
         d_[k] = d[i,j]
@@ -402,6 +402,8 @@ def identify_keyidx(target, Glig, atms, datapath, K):
     keyatoms = np.load(f'{datapath}/keyatom.def.npz',allow_pickle=True)
     if 'keyatms' in keyatoms:
         keyatoms = keyatoms['keyatms'].item()
+
+    if target not in keyatoms: return False
     keyidx = [atms.index(a) for a in keyatoms[target] if a in atms]
         
     if len(keyidx) < K: return False

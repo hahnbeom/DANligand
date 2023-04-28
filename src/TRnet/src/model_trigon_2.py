@@ -106,12 +106,13 @@ class SE3TransformerWrapper(nn.Module):
             node_features_lig['1'] = Glig.ndata['x'].float()
 
         ## set3 part
-        if use_checkpoint:
-            hs_rec = checkpoint.checkpoint(self.se3_rec, Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
-            hs_lig = checkpoint.checkpoint(self.se3_lig, Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
-        else:
-            hs_rec = self.se3_rec(Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
-            hs_lig = self.se3_lig(Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
+        #if use_checkpoint:
+        #    hs_rec = checkpoint.checkpoint(self.se3_rec, Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
+        #    hs_lig = checkpoint.checkpoint(self.se3_lig, Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
+        #else:
+        
+        hs_rec = self.se3_rec(Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
+        hs_lig = self.se3_lig(Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
 
         ## input prep to trigonometry attention
         hs_rec = torch.squeeze(hs_rec) # N x d
