@@ -79,10 +79,15 @@ class DataSet(torch.utils.data.Dataset):
             print("%4d/%4d: key name violation %s"%(index,len(self.targets),target))
             return 
 
-        if self.mixkey:
-            keyidx = np.random.choice(keyidx,self.K,replace=False)
+        if self.K > 0:
+            if self.mixkey:
+                keyidx = np.random.choice(keyidx,self.K,replace=False)
+            else:
+                keyidx = keyidx[:self.K]
         else:
-            keyidx = keyidx[:self.K]
+            # else use max 8
+            if len(keyidx) > 8:
+                keyidx = np.random.choice(keyidx,8,replace=False)
         keyatms = np.array(atms)[keyidx]
             
         # hard-coded
@@ -137,9 +142,11 @@ def receptor_graph_from_motifnet(npz,K,dcut=1.8,mode='dist',top_k=8,maxnode=1500
     P_sel = prob[sel]
 
     #dummy placeholder for attention bias feature
-    Abias = np.zeros((len(P_sel),K))
-    
-    nodef = np.concatenate([P_sel,Abias],axis=-1)
+    nodef = [P_sel]
+    if K > 0:
+        Abias = np.zeros((len(P_sel),K))
+        nodef.append(Abias)
+    nodef = np.concatenate(nodef,axis=-1)
 
     X = torch.tensor(xyz[None,]) #expand dimension
     nodef = torch.tensor(nodef)
@@ -349,8 +356,9 @@ def ligand_graph_from_mol2(mol2,K,dcut,read_alt_conf=None,mode='dist',top_k=8,dr
     obt.append(nneighs)
 
     #dummy placeholder
-    key1hot = np.zeros((len(elems),K))
-    obt.append(key1hot)
+    if K > 0:
+        key1hot = np.zeros((len(elems),K))
+        obt.append(key1hot)
     
     obt = np.concatenate(obt,axis=-1)
 
@@ -391,7 +399,7 @@ def ligand_graph_from_mol2(mol2,K,dcut,read_alt_conf=None,mode='dist',top_k=8,dr
 
     return Gnat,Glig,atms    
 
-def identify_keyidx(target, Glig, atms, datapath, K):
+def identify_keyidx(target, Glig, atms, datapath, K=-1):
     ## find key idx as below -- TODO
     # 1,2 2 max separated atoms along 1-st principal axis
     # 3:
