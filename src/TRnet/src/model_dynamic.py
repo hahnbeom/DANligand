@@ -29,7 +29,6 @@ class SE3TransformerWrapper(nn.Module):
                  l0_out_features=32,
                  l1_in_features=0,
                  l1_out_features=0, #???
-                 K=4, # how many Y points
                  embedding_channels=16,
                  c=128,
                  n_trigonometry_module_stack = 5,
@@ -44,7 +43,6 @@ class SE3TransformerWrapper(nn.Module):
         self.d = d
         self.l1_in_features = l1_in_features
         self.scale = 1.0 # num_head #1.0/np.sqrt(float(d))
-        self.K = K
 
         fiber_in = Fiber({0: l0_in_features_lig}) if l1_in_features == 0 \
             else Fiber({0: l0_in_features_lig, 1: l1_in_features})

@@ -16,7 +16,6 @@ from os.path import join, isdir, isfile
 
 import warnings
 warnings.filterwarnings("ignore", message="DGLGraph\.__len__")
-#warnings.filterwarnings("ignore", message="construct")
 
 device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
 
