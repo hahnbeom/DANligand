@@ -62,6 +62,17 @@ args_up = train_arguments(modelname='trsf0_upweight',
                           w_class=10.0,
                           classification_mode='ligand')
 
+args_mix = train_arguments(modelname='trsf0_mix',
+                          topk= 16,
+                          neighmode='topk',
+                          LR=1.0e-4,
+                          pert= False,
+                          mixkey=True,
+                          w_reg=1.e-4,
+                          w_spread=3.0,
+                          w_class=30.0,
+                          classification_mode='ligand')
+
 args_scratch = train_arguments(modelname='scratch',
                                topk= 16,
                                neighmode='topk',
@@ -72,5 +83,17 @@ args_scratch = train_arguments(modelname='scratch',
                                w_spread=3.0,
                                w_class=10.0,
                                classification_mode='ligand')
+
+args_classonly = train_arguments(modelname='classonly',
+                                 topk= 16,
+                                 neighmode='topk',
+                                 LR=1.0e-4,
+                                 pert= False,
+                                 mixkey=True,
+                                 w_reg=1.e-4,
+                                 w_spread=0.0,
+                                 w_class=10.0,
+                                 classification_mode='ligand')
+
 
 
