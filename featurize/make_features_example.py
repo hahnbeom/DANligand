@@ -1,6 +1,10 @@
 import sys
+import numpy as np
 sys.path.insert(0,'/home/hpark/projects/DANligand/featurize')
+
 from featurize_usage import main
+
+mode = 'com'
 
 if mode == 'global': 
     pdb = sys.argv[1]
@@ -21,6 +25,6 @@ elif mode == 'com':
 
     xyz = np.array([x,y,z])
     trg = pdb[:-4]
-    main(pdb,outprefix=trg,gridsize=1.5,com=xyz,boxwidth=25.0,gridoption='com')
+    main(pdb,outprefix=trg,gridsize=1.5,com=xyz,padding=12.0,gridoption='com')
 
     
