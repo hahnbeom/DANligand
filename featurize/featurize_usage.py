@@ -129,15 +129,14 @@ def featurize_target_properties(pdb,npz,out,extrapath="",verbose=False):
 
     return xyz_rec, aas_rec, atmres_rec, atypes_rec, q_rec, bnds_rec, sasa, residue_idx, repsatm_idx, reschains, atmnames
 
-def grid_from_xyz_old(xyzs,xyz_lig,gridsize,
-                      clash=1.5,contact=4.0,
-                      padding=0.0,
-                      option='ligandxyz',
-                      gridout=sys.stdout):
+def grid_from_xyz(xyzs,xyz_lig,gridsize,
+                  clash=2.0,contact=4.0,padding=0.0,
+                  option='ligandxyz',
+                  gridout=sys.stdout):
 
     reso = gridsize*0.7
-    bmin = [min(xyz_lig[:,k]) for k in range(3)]
-    bmax = [max(xyz_lig[:,k]) for k in range(3)]
+    bmin = [min(xyz_lig[:,k])-padding for k in range(3)]
+    bmax = [max(xyz_lig[:,k])+padding for k in range(3)]
 
     imin = [int(bmin[k]/gridsize)-1 for k in range(3)]
     imax = [int(bmax[k]/gridsize)+1 for k in range(3)]
@@ -274,12 +273,13 @@ def main(pdb,outprefix,
         xyz = np.concatenate(np.array([list(xyz[rc].values()) for rc in reschains if rc not in reschain_lig]))
 
         with open(outprefix+'.grid.pdb','w') as gridout:
-            grids = grid_from_xyz(xyz,xyz_lig,gridopt,gridout=gridout)
+            grids = grid_from_xyz(xyz,xyz_lig,gridsize,padding=4.0,option=gridoption,gridout=gridout)
         out.write("Found %d grid points around ligand\n"%(len(grids)))
 
     elif gridoption == 'global':
         xyz = [np.array(list(xyz[rc].values()),dtype=np.float32) for rc in reschains if rc not in maskres]
         xyz = np.concatenate(xyz)
+
         with open(outprefix+'.grid.pdb','w') as gridout:
             grids = grid_from_xyz(xyz,xyz,gridopt,gridout=gridout)
         out.write("Found %d grid points around ligand\n"%(len(grids)))

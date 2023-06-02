@@ -18,19 +18,30 @@ warnings.filterwarnings("ignore", message="DGLGraph\.__len__")
 
 device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
 
-
 ## cutline ---- ligandsize : 150 gridsize : 2200
-
 MAXEPOCH = 500
-BATCH = 5 # ~3time faster w/ B=10, ~4 times w/ B=20
+BATCH = 3 # ~3time faster w/ B=10, ~4 times w/ B=20
 LR = 1.0e-4 #2.0e-3
 K = 4 # num key points
+datapath = '/ml/motifnet/TRnet.ligand'
 verbose = False
-datapath = 'data.' + sys.argv[1]
-# datapath = 'data.ext'
 neighmode = 'topk' #'distT'
-modelname = sys.argv[2]
+modelname = sys.argv[1]
 w_reg = 1.e-4
+
+modelparams = {'num_layers_lig':4,
+               'num_layers_rec':4,
+               'num_channels':16, #within se3
+               'l1_in_features':0,
+               'l0_out_features':32, #at Xatn
+               'n_heads_se3':4,
+               'embedding_channels':32,
+               'c':32,
+               'n_trigonometry_module_stack':5, 
+               'div':4,
+               'K':K,
+               'dropout':0.2,
+}
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -42,6 +53,7 @@ def collate(samples):
     label = []
     labelxyz = []
     info = []
+    
     for s in samples:
         if s == None: continue
         Grec.append(s[0])
@@ -56,47 +68,23 @@ def collate(samples):
     a = dgl.batch(Grec)
     b = dgl.batch(Glig)
 
-    return dgl.batch(Grec), dgl.batch(Glig), labelxyz, label, info, len(samples)
+    return dgl.batch(Grec), dgl.batch(Glig), labelxyz, label, info, len(info)
 
 def custom_loss(prefix, Yrec, Ylig):
     # print(Ylig)
 
-    print(Yrec.shape, Ylig.shape)
     dY = Yrec-Ylig
     loss = torch.sum(dY*dY,dim=1)
     
-    #if verbose:
-    #    for k in range(K):
-            #print("%-10s %1d"%(prefix, k), loss[k],
-            #      " %8.3f"*3%tuple(Yrec[k]), "|", " %8.3f"*3%tuple(Ylig[k]))
-
     N = Yrec.shape[0]
     loss_sum = torch.sum(loss)/N
     meanD = torch.mean(torch.sqrt(loss))
-    # if verbose:
 
-        #print("%-10s MSE: %8.3f / mean(d): %8.3f"%(prefix, float(loss_sum), meanD))
-        # print("%-10s MSE/ mean(d): "%prefix, float(loss_sum), meanD)
+    #for k in range(K):
+    #    print("%-10s %1d"%(prefix, k), loss[k], Yrec[k], Ylig[k])
+        
     return loss_sum, meanD
 
-def custom_loss2(Yrec,Ylig):
-    print(Yrec, Ylig)
-
-    
-
-modelparams = {'num_layers_lig':4,
-               'num_layers_rec':4,
-               'num_channels':16, #within se3
-               'l1_in_features':0,
-               'l0_out_features':16, #at Xatn
-               'n_heads_se3':4,
-               'embedding_channels':16,
-               'c':16,
-               'n_trigonometry_module_stack':5, 
-               'div':4,
-               'K':K,
-               'dropout':0.2,
-}
 model = SE3TransformerWrapper(**modelparams)
 model.to(device)
 
@@ -157,13 +145,8 @@ if 'keyatms' in keyatms: keyatms = keyatms['keyatms'].item()
 print("preparing dataset")
 
 # very slow on "a in keyatms"
-
-if datapath == 'data.ext':
-    trainmols = [a for a in np.load(f'{datapath}/trainlist.npy')][:20] # if a in keyatms] # read only if key idx defined
-    validmols = [a for a in np.load(f'{datapath}/validlist.npy')][:5] # if a in keyatms] # read only if key idx defined
-else:
-    trainmols = [a for a in np.load(f'{datapath}/trainlist.npy')] # 15641 trains
-    validmols = [a for a in np.load(f'{datapath}/validlist.npy')] # 1905 valids
+trainmols = [a for a in np.load('data/trainlist.npy')] # 15641 trains
+validmols = [a for a in np.load('data/validlist.npy')] # 1905 valids
 
 trainset = dataset.DataSet(trainmols,K=K,datapath=datapath,neighmode=neighmode)
 validset = dataset.DataSet(validmols,K=K,datapath=datapath,neighmode=neighmode)#,pert=True)
@@ -181,13 +164,13 @@ generator_params = {
 train_generator = torch.utils.data.DataLoader(trainset, **generator_params)
 valid_generator = torch.utils.data.DataLoader(validset, **generator_params)
 
-
+torch.cuda.empty_cache()
 for epoch in range(startepoch,MAXEPOCH):  
     loss_t = {'total':[],'mae':[],'reg':[]}
     t0 = time.time()
     for i,(G1,G2,labelxyz,keyidx,info,b) in enumerate(train_generator):
         if b == 1: continue # hack!
-            
+
         G1 = G1.to(device) # rec
         G2 = G2.to(device) # lig
 
@@ -196,12 +179,9 @@ for epoch in range(startepoch,MAXEPOCH):
         labelidx = [torch.eye(n)[idx].to(device) for n,idx in zip(G2.batch_num_nodes(),keyidx)]
         labelxyz = labelxyz.to(device)
 
-        for i in labelidx:
-            print(i.shape)
         Yrec,z = model( G1, G2, labelidx)
 
         prefix = "TRAIN %s"%info[0]['name']
-
         loss, mae = custom_loss( prefix, Yrec, labelxyz ) #both are Kx3 coordinates
 
         l2_reg = torch.tensor(0.).to(device)

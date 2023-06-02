@@ -142,7 +142,7 @@ def read_params(p,as_list=False,ignore_hisH=True,aaname=None):
     return atms,qs,atypes,bnds,repsatm
 
 def read_pdb(pdb,read_ligand=False,aas_allowed=[],
-             aas_disallowed=[]):
+             aas_disallowed=[],exclchain=[]):
     resnames = []
     reschains = []
     xyz = {}
@@ -155,7 +155,8 @@ def read_pdb(pdb,read_ligand=False,aas_allowed=[],
         aa3 = l[17:20].strip()
 
         if aas_allowed != [] and aa3 not in aas_allowed: continue
-            
+        if l[21] in exclchain: continue
+        
         reschain = l[21]+'.'+l[22:27].strip()
 
         if aa3[:2] in METAL: aa3 = aa3[:2]
@@ -256,7 +257,7 @@ def fa2gentype(fats):
     return gents
 
 def defaultparams(aa,
-                  datapath='/applic/Rosetta/database/chemical/residue_type_sets/fa_standard/residue_types',
+                  datapath='/applic/rosetta/current/database/chemical/residue_type_sets/fa_standard/residue_types',
                   extrapath=''):
     # first search through Rosetta database
     p = None

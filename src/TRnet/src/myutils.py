@@ -1,9 +1,22 @@
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
+
+def to_cuda(x, device):
+    if isinstance(x, torch.Tensor):
+        return x.to(device)
+    elif isinstance(x, tuple):
+        return (to_cuda(v, device) for v in x)
+    elif isinstance(x, list):
+        return [to_cuda(v, device) for v in x]
+    elif isinstance(x, dict):
+        return {k: to_cuda(v, device) for k, v in x.items()}
+    else:
+        # DGLGraph or other objects
+        return x.to(device=device)
 
 def rmsd(Y,Yp): # Yp: require_grads
-    device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
+    device = Y.device
     Y = Y - Y.mean(axis=0)
     Yp = Yp - Yp.mean(axis=0)
 

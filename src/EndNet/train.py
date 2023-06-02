@@ -33,6 +33,7 @@ model = SE3TransformerWrapper( num_layers=4,
                                n_trigonometry_module_stack=2,
                                )
 
+
 print("Nparams:", count_parameters(model))
 
 params_loader = {
@@ -58,13 +59,13 @@ set_params = {
     }
 
 #train_set = Dataset(np.load('data/GridNet.ligand/datalist.npy'), **set_params)
-train_set = Dataset(np.load("data/GridNet.ligand/trainlist.npy"), **set_params)
+train_set = Dataset(np.load("data/GridNet.ligand/trainlist.npy")[:1000], **set_params)
 train_loader = data.DataLoader(train_set,
                                worker_init_fn=lambda _: np.random.seed(),
                                **params_loader)
 
 #valid_set = Dataset('data/GridNet.ligand/datalist.npy', **set_params)
-valid_set = Dataset(np.load("data/GridNet.ligand/validlist.npy")[:1], **set_params)
+valid_set = Dataset(np.load("data/GridNet.ligand/validlist.npy")[:100], **set_params)
 valid_loader = data.DataLoader(valid_set,
                                worker_init_fn=lambda _: np.random.seed(),
                                **params_loader)
@@ -239,7 +240,7 @@ for epoch in range(start_epoch, max_epochs):
 
         # labels/mask have different size & cannot be Tensored -- better way?
         labels   = [torch.tensor(v["labels"], dtype=torch.float32).to(device) for v in info]
-        mask     = [torch.tensor(v["mask"], dtype=torch.float32).to(device) for v in info] # to float
+        masks     = [torch.tensor(v["mask"], dtype=torch.float32).to(device) for v in info] # to float
         Gsize     = torch.tensor([v["numnode"] for v in info]).to(device)
         pnames   = [v["pname"] for v in info]
         grids     = [v["grids"] for v in info]
@@ -250,7 +251,11 @@ for epoch in range(start_epoch, max_epochs):
         ## 3. Regularization Loss --  regularize pre-sigmoid value |x|<4
         p_reg = torch.nn.functional.relu(torch.sum(pred*pred-25.0)) #safe enough?
 
-        loss = loss_struct #TODO
+        ## if categorical included
+        lossC,lossG,lossR,bygrid=MaskedBCE(labels,preds,masks)
+        loss = torch.tensor(np.log(loss_struct.cpu().detach().numpy())+(0.7*lossC.cpu().detach().numpy()+0.3*lossG.cpu().detach().numpy())) #TODO
+        loss.to(device)
+
         
         #header = [v["pname"]+" %8.3f"*3%tuple(v["xyz"].squeeze()) for v in info]
         print(info[0]['pname'], float(loss.cpu()))
@@ -309,7 +314,7 @@ for epoch in range(start_epoch, max_epochs):
 
             # labels/mask have different size & cannot be Tensored -- better way?
             labels   = [torch.tensor(v["labels"], dtype=torch.float32).to(device) for v in info]
-            mask     = [torch.tensor(v["mask"], dtype=torch.float32).to(device) for v in info] # to float
+            masks     = [torch.tensor(v["mask"], dtype=torch.float32).to(device) for v in info] # to float
             Gsize     = torch.tensor([v["numnode"] for v in info]).to(device)
             pnames   = [v["pname"] for v in info]
             grids     = [v["grids"] for v in info]
@@ -317,8 +322,11 @@ for epoch in range(start_epoch, max_epochs):
             ## 2. Structure loss
             loss_struct, mae = structure_loss( Yrec_s, labelxyz ) #both are Kx3 coordinates
             
-            loss = loss_struct #TODO
-        
+            ## if categorical included
+            lossC,lossG,lossR,bygrid=MaskedBCE(labels,preds,masks)
+            loss = torch.tensor(np.log(loss_struct.cpu().numpy())+(0.7*lossC.cpu().numpy()+0.3*lossG.cpu().numpy())) #TODO
+            loss.to(device)
+
             #header = [v["pname"]+" %8.3f"*3%tuple(v["xyz"].squeeze()) for v in info]
             print(info[0]['pname'], float(loss.cpu()))
 

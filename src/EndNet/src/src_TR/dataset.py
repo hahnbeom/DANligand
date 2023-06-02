@@ -353,6 +353,7 @@ def identify_keyidx(target, Glig, atms, datapath, K):
     keyatoms = np.load(f'{datapath}/keyatom.def.npz',allow_pickle=True)
     if 'keyatms' in keyatoms:
         keyatoms = keyatoms['keyatms'].item()
+    if target not in keyatoms: return False
     keyidx = [atms.index(a) for a in keyatoms[target] if a in atms]
         
     if len(keyidx) < K: return False
