@@ -29,7 +29,6 @@ class SE3TransformerWrapper(nn.Module):
                  l0_out_features=32,
                  l1_in_features=0,
                  l1_out_features=0, #???
-                 K=4, # how many Y points
                  embedding_channels=16,
                  c=128,
                  n_trigonometry_module_stack = 5,
@@ -44,7 +43,6 @@ class SE3TransformerWrapper(nn.Module):
         self.d = d
         self.l1_in_features = l1_in_features
         self.scale = 1.0 # num_head #1.0/np.sqrt(float(d))
-        self.K = K
 
         fiber_in = Fiber({0: l0_in_features_lig}) if l1_in_features == 0 \
             else Fiber({0: l0_in_features_lig, 1: l1_in_features})
@@ -108,12 +106,6 @@ class SE3TransformerWrapper(nn.Module):
         if self.l1_in_features > 0:
             node_features_rec['1'] = Grec.ndata['x'].float()
             node_features_lig['1'] = Glig.ndata['x'].float()
-
-        ## set3 part
-        #if use_checkpoint:
-        #    hs_rec = checkpoint.checkpoint(self.se3_rec, Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
-        #    hs_lig = checkpoint.checkpoint(self.se3_lig, Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
-        #else:
         
         hs_rec = self.se3_rec(Grec, node_features_rec, edge_features_rec)['0'] # N x d x 1
         hs_lig = self.se3_lig(Glig, node_features_lig, edge_features_lig)['0'] # M x d x 1
@@ -138,7 +130,7 @@ class SE3TransformerWrapper(nn.Module):
         for i in range(1,len(size1)):
             label_to_batch = torch.cat((label_to_batch,labelidx[i].transpose(1,0)),dim=0)
 
-        label_batched, label_mask = to_dense_batch(label_to_batch, batchvec_lig)
+        label_batched, labelmask2 = to_dense_batch(label_to_batch, batchvec_lig)
         label_batched = label_batched.transpose(2,1) # b x K x j
 
         hs_rec_batched, hs_rec_mask = to_dense_batch(hs_rec, batchvec_rec)
@@ -155,7 +147,7 @@ class SE3TransformerWrapper(nn.Module):
         hs_lig_mask = hs_lig_mask.bool()
 
         z = torch.einsum('bnd,bmd->bnmd', hs_rec_batched, hs_lig_batched )
-        z_mask = torch.einsum('bn,bm->bnm',hs_rec_mask, hs_lig_mask )
+        z_mask = torch.einsum('bn,bm->bnm', hs_rec_mask, hs_lig_mask )
 
         rec_pair = get_pair_dis_one_hot(r_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d).float()
         lig_pair = get_pair_dis_one_hot(l_coords_batched, bin_size=2, bin_min=-1, num_classes=self.d).float()
@@ -181,12 +173,19 @@ class SE3TransformerWrapper(nn.Module):
 
         # final processing
         z = self.lastlinearlayer(z).squeeze(-1) #real17 ext15
-        z = masked_softmax(self.scale*z, mask=z_mask, dim = 1)
 
-        Yrec_s = torch.einsum("bij,bic->bjc",z,r_coords_batched) # "Weighted sum":  i x j , i x 3 -> j x 3
+        # z: b x N x K
+        z = masked_softmax(self.scale*z, mask=z_mask, dim = 1) # softmax over Nrec
+
+        Yrec_s = torch.einsum("bik,bic->bkc",z,r_coords_batched) # "Weighted sum":  N x K , N x 3 -> K x 3
 
         Yrec_s = [l for l in Yrec_s]
         Yrec_s = torch.stack(Yrec_s,dim=0)
+        
+        #print(hs_lig_mask.shape, Yrec_s.shape)
+        #Yrec_s = torch.einsum("bkc,bk->bkc", Yrec_s, hs_lig_mask)
+        hs_lig_mask = hs_lig_mask[:,:,None].repeat(1,1,3)
+        Yrec_s = Yrec_s * hs_lig_mask
 
-        return Yrec_s, z #B x ? x ?
+        return Yrec_s, z #b x K x 3, b x N x K
 

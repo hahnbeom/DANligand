@@ -7,8 +7,7 @@ import dgl
 import torch.nn as nn
 from src.model_merge import HalfModel
 import src.myutils as myutils
-import src.dataset_merge as dataset
-#from src.myutils import generate_pose, report_attention, show_how_attn_moves
+import src.dataset as dataset
 
 # DDP 
 import torch.multiprocessing as mp
@@ -19,13 +18,12 @@ import warnings
 warnings.filterwarnings("ignore", message="DGLGraph\.__len__")
 
 # args
-from args import args_up as args
+from args import args_dynamic2 as args
 
 # Dataset params
-K = 4 # keyatoms
 datapath = '/ml/motifnet/TRnet.ligand/' #'/home/j2ho/DB/Motifnet'
 
-set_params = {'K':K,
+set_params = {'K':args.K,
               'datapath':datapath,
               'neighmode': args.neighmode,
               'topk'  : args.topk,
@@ -37,15 +35,14 @@ set_params = {'K':K,
 
 modelparams = {'num_layers_lig':3,
                'num_layers_rec':2,
-               'num_channels':16, #within se3; adds small memory (~n00 MB?)
+               'num_channels':32, #within se3; adds small memory (~n00 MB?)
                'l1_in_features':0,
-               'l0_out_features':32, #at Xatn
+               'l0_out_features':64, #at Xatn
                'n_heads_se3':4,
-               'embedding_channels':32,
+               'embedding_channels':64,
                'c':32, #actual channel size within trigon attn?
                'n_trigonometry_module_stack':5,
                'div':4,
-               'K':K,
                'dropout':0.2,
                'classification_mode':args.classification_mode
 }
@@ -94,7 +91,7 @@ def load_data(args_in):
     
     # get train/valid data
     target_s = []
-    for ln in open('/ml/motifnet/TRnet.ligand/data/0329_decoy.list','r'):
+    for ln in open('data/0519_decoy.list','r'):
         x = ln.strip().split()
         target = x[0]
         liglist = x
@@ -192,8 +189,6 @@ def load_model( args_in ):
         valid_loss = {'total':[],'mae':[],'loss1':[],'loss2':[],'lossaff':[]}
         startepoch = 0
 
-    print(count_parameters(model))
-    
     return model, optimizer, train_loss, valid_loss, startepoch
 
 def run_epoch(model, optimizer, generator, args_in, train=False):

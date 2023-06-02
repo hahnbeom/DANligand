@@ -165,6 +165,6 @@ class MaskedSoftmax(nn.Module):
 
 def masked_softmax(x, mask, **kwargs):
     x_masked = x.clone()
-    x_masked[mask == 0] = -float("inf")
+    x_masked[mask == 0] = -1.0e10 #-float("inf")
 
     return torch.softmax(x_masked, **kwargs)

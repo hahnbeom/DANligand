@@ -57,14 +57,14 @@ class TrigonModule(nn.Module):
 
         hs_rec = self.Wrs(hs_rec)
         hs_lig = self.Wls(hs_lig)
-        
-        key_to_batch = keyidx[0].transpose(1,0)
+
+        #### !!!!! TODO
+        key_to_batch = keyidx[0].transpose(1,0) # Nlig_i x K_i
+        for i in range(1,len(size1)):
+            key_to_batch = torch.cat((key_to_batch,keyidx[i].transpose(1,0)),dim=0)
         
         r_coords_batched, _ = to_dense_batch(recxyz, batchvec_rec)
         l_coords_batched, _ = to_dense_batch(ligxyz, batchvec_lig)
-
-        for i in range(1,len(size1)):
-            key_to_batch = torch.cat((key_to_batch,keyidx[i].transpose(1,0)),dim=0)
 
         key_batched, key_mask = to_dense_batch(key_to_batch, batchvec_lig)
         key_batched = key_batched.transpose(2,1) # b x K x j
@@ -103,7 +103,7 @@ class TrigonModule(nn.Module):
                 
             z = self.tranistion(z)
             
-        return z, z_mask, hs_lig_batched
+        return z, z_mask, hs_lig_batched, hs_lig_mask
 
 class HalfModel(nn.Module):
     """SE(3) equivariant GCN with attention"""
@@ -168,9 +168,10 @@ class HalfModel(nn.Module):
 
         # last processing -- classification
         if self.classification_mode == 'ligand':
-            self.rapool = nn.AdaptiveMaxPool2d((100,32))
-            self.lhpool = nn.AdaptiveMaxPool2d((20,32))
-            self.linear_pre_aff = nn.Linear(32,1)
+            self.lapool = nn.AdaptiveMaxPool2d((4,c)) #nn.Linear(l0_out_features,c)
+            self.rapool = nn.AdaptiveMaxPool2d((100,c))
+            self.lhpool = nn.AdaptiveMaxPool2d((20,c))
+            self.linear_pre_aff = nn.Linear(c,1)
             self.linear_for_aff = nn.Linear(124,1)
                 
         elif self.classification_mode == 'tank':
@@ -208,12 +209,12 @@ class HalfModel(nn.Module):
         hs_lig = torch.squeeze(hs_lig) # M x d
         
         batchvec_rec = make_batch_vec(Grec.batch_num_nodes()).to(Grec.device)
-        hs_rec_batched, hs_rec_mask = to_dense_batch(hs_rec, batchvec_rec)
+        hs_rec_batched, _ = to_dense_batch(hs_rec, batchvec_rec)
         batchvec_lig = make_batch_vec(Glig.batch_num_nodes()).to(Glig.device)
-        hs_lig_batched, hs_lig_mask = to_dense_batch(hs_lig, batchvec_lig)
-        
+        hs_lig_batched, _ = to_dense_batch(hs_lig, batchvec_lig)
+
         #z: B x N x K x c(?)
-        z, z_mask,hs_lig_batched_k = self.trigon_module(Grec, Glig, hs_rec, hs_lig, keyidx, use_checkpoint, drop_out=drop_out)
+        z, z_mask,hs_lig_batched_k, hs_lig_mask_k = self.trigon_module(Grec, Glig, hs_rec, hs_lig, keyidx, use_checkpoint, drop_out=drop_out)
         
         #for i,(A,n) in enumerate(zip(z,Grec.batch_num_nodes())):
         #    print(i,A[:n].sum())
@@ -223,24 +224,29 @@ class HalfModel(nn.Module):
             exp_z = torch.exp(z) 
             # soft alignment 
             # normalize each row of z for receptor counterpart
-            zr_denom = exp_z.sum(axis=(-2)).unsqueeze(-2) # 1 x Nrec x 1 x 32
-            zr = torch.div(exp_z,zr_denom) # 1 x Nrec x 4 x 32
-            ra = zr*hs_lig_batched_k.unsqueeze(1) # 1 x Nrec x 4 x 32
-            ra = ra.sum(axis=-2) # 1 x Nrec x 32
-            
+            zr_denom = exp_z.sum(axis=(-2)).unsqueeze(-2) # 1 x Nrec x 1 x c
+            zr = torch.div(exp_z,zr_denom) # 1 x Nrec x K x c
+            ra = zr*hs_lig_batched_k.unsqueeze(1) # 1 x Nrec x K x c
+            ra = ra.sum(axis=-2) # 1 x Nrec x c
+
             # normalize each row of z for ligand counterpart
-            zl_denom = exp_z.sum(axis=(-3)).unsqueeze(-3) # 1 x Nrec x 1 x 32
-            zl = torch.div(exp_z,zl_denom) # 1 x Nrec x 4 x 32
-            zl_t = torch.transpose(zl, 1, 2) # 1 x 4 x Nrec x 32
-            la = zl_t*hs_rec_batched.unsqueeze(1) # 1 x 4 x Nrec x 32
-            la = la.sum(axis=-2) # 1 x 4 x 32
+            zl_denom = exp_z.sum(axis=(-3)).unsqueeze(-3) # 1 x Nrec x 1 x c
+            zl = torch.div(exp_z,zl_denom) # 1 x Nrec x K x c
+            zl_t = torch.transpose(zl, 1, 2) # 1 x K x Nrec x c
+
+            la = zl_t*hs_rec_batched.unsqueeze(1) # 1 x K x Nrec x numchannel
+            la = la.sum(axis=-2) # 1 x K x numchannel
+            la = self.lapool(la) # 1 x K x c
 
             # concat and then pool 
-            lh = hs_lig_batched # 1 x Nlig x 32 
-            ra = self.rapool(ra) # 1 x 200 x 32
-            lh = self.lhpool(lh) # 1 x 20 x 32
-            cat = torch.cat([ra,la,lh],dim=1) # 1 x 124 x 32
-            Aff = self.linear_pre_aff(cat).squeeze(-1) # 1 x 124 
+            lh = hs_lig_batched # 1 x Nlig x c
+
+            ra = self.rapool(ra) # 1 x 100 x c
+            lh = self.lhpool(lh) # 1 x 20 x c
+
+            cat = torch.cat([ra,la,lh],dim=1) # 1 x 124 x c
+            
+            Aff = self.linear_pre_aff(cat).squeeze(-1) # 1 x 124
             Aff = self.linear_for_aff(Aff).squeeze(-1) # b x 1 
 
         elif self.classification_mode == 'tank':
@@ -261,7 +267,10 @@ class HalfModel(nn.Module):
         
         Yrec_s = torch.einsum("bij,bic->bjc",z,r_coords_batched) # "Weighted sum":  i x j , i x 3 -> j x 3
         Yrec_s = [l for l in Yrec_s]
-        Yrec_s = torch.stack(Yrec_s,dim=0)
+        Yrec_s = torch.stack(Yrec_s,dim=0) # 1 x K x 3
+
+        hs_lig_mask_k = hs_lig_mask_k[:,:,None].repeat(1,1,3) #1 x max(Nlig) x 3
+        Yrec_s = Yrec_s * hs_lig_mask_k
 
         return Yrec_s, Aff, z #B x ? x ?
 
