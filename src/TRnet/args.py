@@ -12,10 +12,13 @@ class train_arguments:
                  w_spread,
                  w_class,
                  classification_mode,
+                 datapath='/ml/motifnet/TRnet.ligand/grid1.0/', #'/home/j2ho/DB/Motifnet'
                  K=4,
-                 maxepoch=300
+                 maxepoch=300,
+                 max_subset=5
     ):
         self.modelname =           modelname
+        self.datapath =            datapath
         self.topk =                topk          
         self.neighmode =           neighmode
         self.LR =                  LR
@@ -27,6 +30,7 @@ class train_arguments:
         self.classification_mode = classification_mode
         self.maxepoch =            maxepoch
         self.K =                   K
+        self.max_subset =          max_subset
 
         # ddp related
         self.world_size = 1
@@ -75,7 +79,14 @@ args_scratch = copy.deepcopy(args_up)
 args_scratch.modelname = 'scratch'
 
 args_dynamic2 = copy.deepcopy(args_up)
-args_dynamic2.modelname = 'dd1' #dynamic-discrimination
+args_dynamic2.modelname = 'trsf_dynamic' #dynamic-discrimination
 args_dynamic2.K = -1
 
+args_grid15 = copy.deepcopy(args_dynamic2)
+args_grid15.modelname = 'trsf_grid1.5' #dynamic-discrimination
+args_grid15.datapath = '/ml/motifnet/TRnet.combo/'
+# 1:3:20
 
+args_grid15_scratch = copy.deepcopy(args_grid15)
+args_grid15_scratch.modelname = 'scratch_grid1.5' #dynamic-discrimination
+args_grid15_scratch.datapath = '/ml/motifnet/TRnet.combo/'

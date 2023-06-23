@@ -2,6 +2,8 @@ import torch
 import numpy as np
 #import matplotlib.pyplot as plt
 
+ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "empty node"
+
 def to_cuda(x, device):
     if isinstance(x, torch.Tensor):
         return x.to(device)
@@ -137,6 +139,212 @@ def show_how_attn_moves(Z, epoch):
     plt.savefig('../plotpngs/epoch_%d.png'%epoch)
 
     print('plotpngs/epoch_%d.png with %d points saved'%(epoch,int(len(Z))))
+
+def read_mol2(mol2,drop_H=False):
+    read_cont = 0
+    qs = []
+    elems = []
+    xyzs = []
+    bonds = []
+    borders = []
+    atms = []
+    
+    for l in open(mol2):
+        if l.startswith('@<TRIPOS>ATOM'):
+            read_cont = 1
+            continue
+        if l.startswith('@<TRIPOS>BOND'):
+            read_cont = 2
+            continue
+        if l.startswith('@<TRIPOS>SUBSTRUCTURE'):
+            break
+        if l.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+            read_cont = 0
+            continue
+
+        words = l[:-1].split()
+        if read_cont == 1:
+
+            idx = words[0]
+            if words[1].startswith('BR'): words[1] = 'Br'
+            if words[1].startswith('Br') or  words[1].startswith('Cl') :
+                elem = words[1][:2]
+            else:
+                elem = words[1][0]
+
+            if elem == 'A' or elem == 'B' :
+                elem = words[5].split('.')[0]
+            
+            if elem not in ELEMS: elem = 'Null'
+            
+            atms.append(words[1])
+            elems.append(elem)
+            qs.append(float(words[-1]))
+            xyzs.append([float(words[2]),float(words[3]),float(words[4])]) 
+                
+        elif read_cont == 2:
+            # if words[3] == 'du' or 'un': rint(mol2)
+            bonds.append([int(words[1])-1,int(words[2])-1]) #make 0-index
+            bondtypes = {'0':0,'1':1,'2':2,'3':3,'ar':3,'am':2, 'du':0, 'un':0}
+            borders.append(bondtypes[words[3]])
+
+    nneighs = [[0,0,0,0] for _ in qs]
+    for i,j in bonds:
+        if elems[i] in ['H','C','N','O']:
+            k = ['H','C','N','O'].index(elems[i])
+            nneighs[j][k] += 1.0
+        if elems[j] in ['H','C','N','O']:
+            l = ['H','C','N','O'].index(elems[j])
+            nneighs[i][l] += 1.0
+
+    # drop hydrogens
+    if drop_H:
+        nonHid = [i for i,a in enumerate(elems) if a != 'H']
+    else:
+        nonHid = [i for i,a in enumerate(elems)]
+
+    borders = [b for b,ij in zip(borders,bonds) if ij[0] in nonHid and ij[1] in nonHid]
+    bonds = [[nonHid.index(i),nonHid.index(j)] for i,j in bonds if i in nonHid and j in nonHid]
+
+    return np.array(elems)[nonHid], np.array(qs)[nonHid], bonds, borders, np.array(xyzs)[nonHid], np.array(nneighs,dtype=float)[nonHid], list(np.array(atms)[nonHid])
+
+def read_mol2_batch(mol2,tags_read=None,drop_H=True,tag_only=False):
+    read_cont = 0
+    qs_s = {}
+    elems_s = {}
+    xyzs_s = {}
+    bonds_s = {}
+    borders_s = {}
+    atms_s = {}
+    nneighs_s = {}
+    tags = []
+    elems,tag = None, None
+    
+    for l in open(mol2):
+        if l.startswith('@<TRIPOS>MOLECULE'):
+            read_cont = 3
+            if elems != None and ((tags_read == None) or (tag in tags_read)):
+                nneighs = [[0,0,0,0] for _ in qs]
+                for i,j in bonds:
+                    if elems[i] in ['H','C','N','O']:
+                        k = ['H','C','N','O'].index(elems[i])
+                        nneighs[j][k] += 1.0
+                    if elems[j] in ['H','C','N','O']:
+                        l = ['H','C','N','O'].index(elems[j])
+                        nneighs[i][l] += 1.0
+
+                # drop hydrogens
+                if drop_H:
+                    nonHid = [i for i,a in enumerate(elems) if a != 'H']
+                else:
+                    nonHid = [i for i,a in enumerate(elems)]
+
+                borders = [b for b,ij in zip(borders,bonds) if ij[0] in nonHid and ij[1] in nonHid]
+                bonds = [[nonHid.index(i),nonHid.index(j)] for i,j in bonds if i in nonHid and j in nonHid]
+
+                # append to list
+                if tag not in tags:
+                    elems_s[tag] = np.array(elems)[nonHid]
+                    qs_s[tag] = np.array(qs)[nonHid]
+                    bonds_s[tag] = bonds
+                    borders_s[tag] = borders
+                    xyzs_s[tag] = np.array(xyzs)[nonHid]
+                    nneighs_s[tag] = np.array(nneighs,dtype=float)[nonHid]
+                    atms_s[tag] = list(np.array(atms)[nonHid])
+                    tags.append(tag)
+
+            # reset
+            qs,elems,xyzs,bonds,borders,atms = [],[],[],[],[],[]
+            continue
+
+        if read_cont == 3:
+            tag = l[:-1]
+            if tags_read == None or tag in tags_read:
+                read_cont = 4
+            else:
+                read_cont = -1
+            
+        if read_cont < 0 or tag_only: continue
+        
+        if l.startswith('@<TRIPOS>ATOM'):
+            read_cont = 1
+            continue
+        elif l.startswith('@<TRIPOS>BOND'):
+            read_cont = 2
+            continue
+        elif l.startswith('@<TRIPOS>SUBSTRUCTURE'):
+            break
+        elif l.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+            read_cont = 0
+            continue
+
+        if read_cont == 1:
+            words = l[:-1].split()
+            idx = words[0]
+            if words[1].startswith('BR'): words[1] = 'Br'
+            if words[1].startswith('Br') or  words[1].startswith('Cl') :
+                elem = words[1][:2]
+            else:
+                elem = words[1][0]
+
+            if elem == 'A' or elem == 'B' :
+                elem = words[5].split('.')[0]
+            
+            if elem not in ELEMS: elem = 'Null'
+            
+            atms.append(words[1])
+            elems.append(elem)
+            qs.append(float(words[-1]))
+            xyzs.append([float(words[2]),float(words[3]),float(words[4])]) 
+                
+        elif read_cont == 2:
+            words = l[:-1].split()
+            # if words[3] == 'du' or 'un': print(mol2)
+            bonds.append([int(words[1])-1,int(words[2])-1]) #make 0-index
+            bondtypes = {'0':0,'1':1,'2':2,'3':3,'ar':3,'am':2, 'du':0, 'un':0}
+            borders.append(bondtypes[words[3]])
+
+    if tags_read != None:
+        tags_order = [tag for tag in tags_read if tag in tags] # reorder following input
+    else:
+        tags_order = tags
+    elems_s   = [elems_s[tag] for tag in tags_order if tag in tags]
+    qs_s      = [qs_s     [tag] for tag in tags_order if tag in tags]
+    bonds_s   = [bonds_s  [tag] for tag in tags_order if tag in tags]
+    borders_s = [borders_s[tag] for tag in tags_order if tag in tags]
+    xyzs_s    = [xyzs_s   [tag] for tag in tags_order if tag in tags]
+    nneighs_s = [nneighs_s[tag] for tag in tags_order if tag in tags]
+    atms_s    = [atms_s   [tag] for tag in tags_order if tag in tags]
+    
+    return elems_s, qs_s, bonds_s, borders_s, xyzs_s, nneighs_s, atms_s, tags_order
+
+def read_mol2s_xyzonly(mol2):
+    read_cont = 0
+    xyzs = []
+    atms = []
+    
+    for l in open(mol2):
+        if l.startswith('@<TRIPOS>ATOM'):
+            read_cont = 1
+            xyzs.append([])
+            atms.append([])
+            continue
+        if l.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+            read_cont = 0
+            continue
+        
+        if l.startswith('@<TRIPOS>BOND'): 
+            read_cont = 2
+            continue
+
+        words = l[:-1].split()
+        if read_cont == 1:
+            is_H = (words[1][0] == 'H')
+            if not is_H:
+                atms[-1].append(words[1])
+                xyzs[-1].append([float(words[2]),float(words[3]),float(words[4])]) 
+
+    return np.array(xyzs), atms
 
 
 
