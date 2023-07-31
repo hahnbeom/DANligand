@@ -48,6 +48,7 @@ modelparams = {'num_layers_lig':3,
 }
 
 generator_params = {
+    #'shuffle': True,
     'num_workers': 5, #1 if '-debug' in sys.argv else 10,
     'pin_memory': True,
     'collate_fn': dataset.collate,
@@ -61,12 +62,13 @@ def structural_loss(prefix, Yrec, Ylig, nK ):
     # Yrec: BxKx3 Ylig: K x 3
     
     N = Yrec.shape[0]
-    dY = Yrec - Ylig # K x 3
+    dY = Yrec - Ylig # B x K x 3
 
-    loss1 = torch.sum(dY*dY,dim=1) # K
-    
+    loss1 = torch.sum(dY*dY,dim=1) # sum over K
     loss1_sum = torch.sum(loss1)/N 
     
+    #mae = torch.sum(torch.abs(dY),dim=(1,2))/nK # this is correct mae...
+    # below gives lower value than real mae
     meanD = torch.sum(torch.sqrt(loss1))/torch.sum(nK) # mean over 
 
     return loss1_sum, meanD
@@ -92,12 +94,20 @@ def spread_loss(Ylig, A, G, nK, sig=2.0): #Ylig:label(B x K x 3), A:attention (B
     return loss2 # max -(batch_size x K)
 
 def load_data(args_in):
-
-    train_set = dataset.DataSet(np.load('data/trainlist.combo.npy'), **set_params)
+    target_s = []
+    for ln in open(args.datasetf,'r'):
+        x = ln.strip().split()
+        target = x[0]
+        liglist = x
+        target_s.append(target)
+        
+    TN = int(len(target_s)*(1/6)) # 5:1 train/validation
+    
+    train_set = dataset.DataSet(target_s[TN:], **set_params)
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_set, num_replicas=args_in.world_size, rank=args_in.rank)
     train_loader = torch.utils.data.DataLoader(train_set, sampler=train_sampler, **generator_params)
     
-    valid_set = dataset.DataSet(np.load('data/validlist.combo.npy'), **set_params)
+    valid_set = dataset.DataSet(target_s[:TN], **set_params)
     valid_sampler = torch.utils.data.distributed.DistributedSampler(valid_set, num_replicas=args_in.world_size, rank=args_in.rank)
     valid_loader = torch.utils.data.DataLoader(valid_set, sampler=valid_sampler, **generator_params)
     
@@ -206,8 +216,8 @@ def run_epoch(model, optimizer, generator, args_in, train=False):
                 if train: prefix = "TRAIN-%d "%(args_in.rank)
                 else: prefix = "VALID-%d "%(args_in.rank)
             
-                loss1, mae = structural_loss( prefix, Yrec, keyxyz, info['nK'] )
-                loss2 = args_in.w_spread*spread_loss( keyxyz, z, G1s, info['nK'] )
+                loss1, mae = structural_loss( prefix, Yrec, keyxyz, info['nK'].to(device) )
+                loss2 = args_in.w_spread*spread_loss( keyxyz, z, G1s, info['nK'].to(device) )
 
                 print(f"{prefix} {i:5d}/{len(generator):5d} {float(loss1):8.3f} ({float(mae):8.3f}) {float(loss2):8.3f} {info['name']}" )
                 l2_reg = torch.tensor(0.).to(device)
