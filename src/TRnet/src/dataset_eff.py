@@ -10,7 +10,7 @@ import src.myutils as myutils
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, targets, K, datapath='data', neighmode='dist',
                  n=1, maxT=5.0, dcut_lig=5.0, pert=False, noiseP = 0.8, topk=16, maxnode=1500,
-                 max_subset=5,
+                 max_subset=5, randRG=False,
                  mixkey=False, dropH=False, version=1, motifnetnpz=None):
         
         self.targets = targets
@@ -25,6 +25,7 @@ class DataSet(torch.utils.data.Dataset):
         self.noiseP = noiseP
         self.mixkey = mixkey
         self.max_subset = max_subset
+        self.randRG = randRG
         #self.motifnetnpz = motifnetnpz
 
         self.maxnode = maxnode
@@ -57,7 +58,7 @@ class DataSet(torch.utils.data.Dataset):
             keyatomf = self.datapath+'/keyatom.def.npz'
             
         elif self.version == 3: # for inferrence
-            mol2 = target+'.ligands.mol2'
+            mol2 = target+'.ligand.mol2'
             keyatomf = target+'.keyatom.def.npz'
             
         if not os.path.exists(motifnetnpz):
@@ -67,8 +68,8 @@ class DataSet(torch.utils.data.Dataset):
             print(f"{keyatomf} does not exist")
             return info
 
-        if True:
-        #try:
+        #if True:
+        try:
             t1 = time.time()
             Grec = receptor_graph_from_motifnet(motifnetnpz, 
                                                 mode=self.neighmode, top_k=self.topk,
@@ -80,20 +81,21 @@ class DataSet(torch.utils.data.Dataset):
                 blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz = self.read_by_single_mol2(target, target_lig_list, keyatomf, self.K)
                 tags = target_lig_list
             elif self.version == 3:
-                blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, tags = read_by_batch_mol2(mol2, keyatomf, self.K, target_lig_list)
+                blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, tags = read_by_batch_mol2(mol2, keyatomf, self.K, target_lig_list, randrot=self.randRG)
             t3 = time.time()
 
             if not Grec:
                 print("skip %s for size cut %d"%(target, self.maxnode))
                 return info
                 
-        #except:
-        else:
+        except:
+        #else:
             print("failed to read %s"%target)
             return info
 
         info['atms'] = atms_list
         info['lig']  = tags
+        info['nK'] = [len(idx) for idx in keyidx_list]
 
         return Grec, Glig_list, keyxyz, keyidx_list, blabel_list, info #label
 
@@ -148,11 +150,12 @@ class DataSet(torch.utils.data.Dataset):
                     
         return blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz
 
-def read_by_batch_mol2(mol2, keyatomf, K, tags=None):
+def read_by_batch_mol2(mol2, keyatomf, K, tags=None, randrot=False):
     Glig_list = [] 
     blabel_list = []
     keyidx_list = []
     atms_list = []
+    keyxyz_list = []
         
     t0 = time.time()
     (elems,_,bonds,borders,xyz,nneighs,atms,tags) = myutils.read_mol2_batch(mol2, tags)
@@ -171,18 +174,23 @@ def read_by_batch_mol2(mol2, keyatomf, K, tags=None):
             tags_processed.append(tag)
             
             Glig = generate_ligand_graph(e,_,b,o,x,n,a)
-            Glig_list.append(Glig)
+            
             atms_list.append(a)
-            #print(Glig.number_of_nodes(), Glig, keyidx, tag)
-                
+            keyxyz = Glig.ndata['x'][keyidx] # K x 3
+            keyxyz_list.append(keyxyz)
+            x = Glig.ndata['x']
+
+            if randrot:
+                Glig = myutils.RandRG(Glig)
+            Glig_list.append(Glig)
+            
         #else:
         except:
             continue
     t2 = time.time()
-    print(t1-t0, t2-t1)
-            
-    # assume this is inferrence 
-    Gnat, keyxyz = None, None
+
+    # assume inferrence
+    Gnat = None
     blabel_list = [0 for _ in Glig_list]
     
     return blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, tags_processed
@@ -364,7 +372,11 @@ def identify_keyidx(target, atms, keyatomf, K):
     if 'keyatms' in keyatoms:
         keyatoms = keyatoms['keyatms'].item()
 
-    if target not in keyatoms: return None
+    if target not in keyatoms:
+        print(f"cannot find keyidx for {target} from the file {keyatomf}")
+        return None
+    if not isinstance(atms,list): atms = list(atms)
+    
     keyidx = np.array([atms.index(a) for a in keyatoms[target] if a in atms],dtype=int)
         
     if len(keyidx) < 4: return None
@@ -406,7 +418,7 @@ def collate(samples):
     args = samples[0]
     if len(args) == 1: # info
         return None, None, None, None, None, args
-        
+
     (G1,G2s,keyxyz,keyidx_list,blabel,info) = samples[0]
 
     if G1 == None: #or keyxyz == None:
@@ -417,13 +429,12 @@ def collate(samples):
 
     ## separate batch here...
     # not very memory efficient
-    G1s = dgl.batch([G1 for _ in range(b)])
     keyidx = [torch.eye(n)[idx] for n,idx in zip(G2s.batch_num_nodes(),keyidx_list)]
     blabel = torch.tensor(blabel,dtype=float)
 
     if keyxyz != None:
         keyxyz = keyxyz.squeeze() # K x 3
-    
+
     # info
-    return G1s, G2s, keyxyz, keyidx, blabel, info
+    return G1, G2s, keyxyz, keyidx, blabel, info
 

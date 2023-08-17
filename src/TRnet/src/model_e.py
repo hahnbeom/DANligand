@@ -47,29 +47,16 @@ class TrigonModule(nn.Module):
         self.triangle_self_attention_list = nn.ModuleList([TriangleSelfAttentionRowWise(embedding_channels=embedding_channels, c=c) for _ in range(n_trigonometry_module_stack)])
 
     def forward(self, Grec, Glig, hs_rec, hs_lig, keyidx, use_checkpoint, drop_out=False):
-        size1 = Grec.batch_num_nodes()
         size2 = Glig.batch_num_nodes()
+        B = size2.shape[0]
         
         recxyz = Grec.ndata['x'].squeeze().float()
         ligxyz = Glig.ndata['x'].squeeze().float()
-
-        batchvec_rec = make_batch_vec(size1).to(Grec.device)
+        
         batchvec_lig = make_batch_vec(size2).to(Grec.device)
 
         hs_rec = self.Wrs(hs_rec)
         hs_lig = self.Wls(hs_lig)
-
-        #### !!!!! TODO
-        '''
-        key_to_batch = keyidx[0].transpose(1,0) # Nlig_i x K_i
-        print(keyidx[0].shape, len(keyidx))
-        for i in range(1,len(size1)):
-            key_to_batch = torch.cat((key_to_batch,keyidx[i].transpose(1,0)),dim=0)
-        print(key_to_batch.shape)
-        key_batched, key_mask = to_dense_batch(key_to_batch, batchvec_lig)
-        key_batched = key_batched.transpose(2,1) # b x K x j
-        print(key_batched)
-        '''
 
         Kmax = max([idx.shape[0] for idx in keyidx])
         Nmax = max([idx.shape[1] for idx in keyidx])
@@ -77,10 +64,17 @@ class TrigonModule(nn.Module):
         for i,idx in enumerate(keyidx):
             key_batched[i,:idx.shape[0],:idx.shape[1]] = idx
 
-        r_coords_batched, _ = to_dense_batch(recxyz, batchvec_rec)
-        l_coords_batched, _ = to_dense_batch(ligxyz, batchvec_lig)
+        # just repeat instead
+        #size1 = Grec.batch_num_nodes()
+        #batchvec_rec = make_batch_vec(size1).to(Grec.device)
+        #r_coords_batched, _ = to_dense_batch(recxyz, batchvec_rec)
+        #hs_rec_batched, hs_rec_mask = to_dense_batch(hs_rec, batchvec_rec)
 
-        hs_rec_batched, hs_rec_mask = to_dense_batch(hs_rec, batchvec_rec)
+        r_coords_batched = recxyz[None,:,:].repeat((B,1,1))
+        hs_rec_batched = hs_rec[None,:,:].repeat((B,1,1))
+        hs_rec_mask = torch.ones((B,hs_rec.shape[0])).to(Grec.device)
+        
+        l_coords_batched, _ = to_dense_batch(ligxyz, batchvec_lig)
         hs_lig_batched, hs_lig_mask = to_dense_batch(hs_lig, batchvec_lig)
 
         hs_lig_batched = torch.einsum('bkj,bjd->bkd',key_batched,hs_lig_batched)
@@ -174,8 +168,7 @@ class HalfModel(nn.Module):
         self.trigon_module =  TrigonModule(n_trigonometry_module_stack,
                                            embedding_channels=embedding_channels,
                                            c=c,
-                                           d=l0_out_features,
-                                           dropout=dropout
+                                           d=l0_out_features
         )
 
         # last processing -- classification
@@ -200,6 +193,7 @@ class HalfModel(nn.Module):
 
     def forward(self, Grec, Glig, keyidx, use_checkpoint=False, drop_out=True):
         t0 = time.time()
+        B = Glig.batch_num_nodes().shape[0]
         node_features_rec = {'0':Grec.ndata['attr'][:,:,None].float()}#,'1':Grec.ndata['x'].float()}
         edge_features_rec = {'0':Grec.edata['attr'][:,:,None].float()}
 
@@ -224,15 +218,19 @@ class HalfModel(nn.Module):
         hs_rec = torch.squeeze(hs_rec) # N x d
         hs_lig = torch.squeeze(hs_lig) # M x d
         
-        batchvec_rec = make_batch_vec(Grec.batch_num_nodes()).to(Grec.device)
-        hs_rec_batched, _ = to_dense_batch(hs_rec, batchvec_rec)
+        #batchvec_rec = make_batch_vec(Grec.batch_num_nodes()).to(Grec.device)
+        #hs_rec_batched, _ = to_dense_batch(hs_rec, batchvec_rec)
+
+        hs_rec_batched = hs_rec[None,:,:].repeat((B,1,1))
         batchvec_lig = make_batch_vec(Glig.batch_num_nodes()).to(Glig.device)
         hs_lig_batched, _ = to_dense_batch(hs_lig, batchvec_lig)
 
         #z: B x N x K x c(?)
+        #bGrec = dgl.batch([Grec for _ in range(B)])
+
         z, z_mask,hs_lig_batched_k, hs_lig_mask_k = self.trigon_module(Grec, Glig, hs_rec, hs_lig, keyidx, use_checkpoint, drop_out=drop_out)
         t4 = time.time()
-
+        
         # for classification
         if self.classification_mode == 'ligand':
             exp_z = torch.exp(z) 
@@ -270,25 +268,29 @@ class HalfModel(nn.Module):
                             self.linear2(F.relu(self.linear2a(z))) ).squeeze(-1) * z_mask
             affinity_pred = self.leaky(self.bias + ((pair_energy).sum(axis=(-1,-2)))) # "NK energy sum"
             Aff = affinity_pred # 1
+        t5 = time.time()
             
         # for structureloss
         z = self.lastlinearlayer(z).squeeze(-1) #real17 ext15
         z = masked_softmax(self.scale*z, mask=z_mask, dim = 1)
         
         # final processing
-        batchvec_rec = make_batch_vec(Grec.batch_num_nodes()).to(Grec.device)
         # r_coords_batched: B x Nmax x 3
-        r_coords_batched, _ = to_dense_batch(Grec.ndata['x'].squeeze().float(), batchvec_rec) # time consuming!!
-
-        #r_ccords_batched = Grec.ndata['x'].repeat()
-        #print(Grec.batch_num_nodes().shape, r_coords_batched.shape, Grec.ndata['x'].shape, batchvec_rec.shape)
+        #batchvec_rec = make_batch_vec(Grec.batch_num_nodes()).to(Grec.device)
+        #r_coords_batched, _ = to_dense_batch(Grec.ndata['x'].squeeze().float(), batchvec_rec) # time consuming!!
         
-        Yrec_s = torch.einsum("bij,bic->bjc",z,r_coords_batched) # "Weighted sum":  i x j , i x 3 -> j x 3
+        x = Grec.ndata['x'].float().transpose(0,1)
+        r_coords_batched = x.repeat((B,1,1))
+        
+        Yrec_s = torch.einsum("bij,bic->bjc",z,r_coords_batched) # "Weighted sum": NxM, Nx3 -> Mx3
         Yrec_s = [l for l in Yrec_s]
         Yrec_s = torch.stack(Yrec_s,dim=0) # 1 x K x 3
 
         hs_lig_mask_k = hs_lig_mask_k[:,:,None].repeat(1,1,3) #1 x max(Nlig) x 3
         Yrec_s = Yrec_s * hs_lig_mask_k
 
+        t9 = time.time()
+        #print("model", t1-t0,t2-t1,t3-t2,t4-t3,t5-t4,t9-t5,t9-t0)
+        
         return Yrec_s, Aff, z #B x ? x ?
 
