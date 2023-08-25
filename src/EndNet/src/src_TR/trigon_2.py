@@ -147,12 +147,12 @@ class TriangleSelfAttentionRowWise(torch.nn.Module):
         z = self.final_linear(z) * z_mask.unsqueeze(-1)
         return z
 
-def get_pair_dis_one_hot(d, bin_size=2, bin_min=-1, bin_max=30):
+def get_pair_dis_one_hot(d, bin_size=2, bin_min=-1, bin_max=30, num_classes=32):
     # without compute_mode='donot_use_mm_for_euclid_dist' could lead to wrong result.
     pair_dis = torch.cdist(d, d, compute_mode='donot_use_mm_for_euclid_dist')
     pair_dis[pair_dis>bin_max] = bin_max
     pair_dis_bin_index = torch.div(pair_dis - bin_min, bin_size, rounding_mode='floor').long()
-    pair_dis_one_hot = torch.nn.functional.one_hot(pair_dis_bin_index, num_classes=32)
+    pair_dis_one_hot = torch.nn.functional.one_hot(pair_dis_bin_index, num_classes=num_classes)
     return pair_dis_one_hot
 
 class Transition(torch.nn.Module):

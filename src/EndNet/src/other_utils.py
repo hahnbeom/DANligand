@@ -137,6 +137,15 @@ def to_dense_adj(edge_index, batch=None, edge_attr=None, max_num_nodes=None):
 
     return adj
 
+def make_batch_vec(size_vec):
+    batch_vector = []
+    n=0
+    for i in size_vec:
+        for k in range(i):
+            batch_vector.append(n)
+        n+=1
+
+    return torch.tensor(batch_vector)
 
 class MaskedSoftmax(nn.Module):
     def __init__(self):
@@ -162,9 +171,3 @@ class MaskedSoftmax(nn.Module):
         if mask is not None:
             x_exp = x_exp * mask.float()
         return x_exp / x_exp.sum(1).unsqueeze(-1)
-
-def masked_softmax(x, mask, **kwargs):
-    x_masked = x.clone()
-    x_masked[mask == 0] = -float("inf")
-
-    return torch.softmax(x_masked, **kwargs)
