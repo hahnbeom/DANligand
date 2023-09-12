@@ -133,6 +133,50 @@ def show_how_attn_moves(Z, epoch):
 
     print('plotpngs/epoch_%d.png with %d points saved'%(epoch,int(len(Z))))
 
+def get_points_on_sphere(center=(0., 0., 0.), radius=1., n=100):
+    pts = []
+
+    inc = np.pi * (3 - np.sqrt(5)) # increment
+    off = 2 / n
+
+    for k in range(n):
+        y = k * off - 1 + (off / 2)
+        r = np.sqrt(1 - y * y)
+        phi = k * inc
+        pts.append([np.cos(phi) * r, y, np.sin(phi) * r])
+
+    pts = np.array(pts) * radius + np.array(center)
+    return pts
+    
+def atomic_sasa(xyz, elems, probe_radius=1.4, n_samples=100):
+    areas = []
+    normareas = []
+    centers = xyz
+    radii = radii_by_elem(elems)
+    n_atoms = len(elems)
+        
+    expanded_center = np.expand_dims(np.array(centers), axis=0).repeat(n_samples, axis=0)
+    for center, radius in zip(centers, radii):
+        pts = get_points_on_sphere(center=center,
+                                   radius=(radius + probe_radius),
+                                   n=n_samples)
+
+        pts = pts.repeat(n_atoms, 0).reshape(n_samples, n_atoms, 3) 
+        d2 = np.sum((pts - expanded_center) ** 2, axis=2) # Here. time-consuming line
+        r2 = (np.array(radii) + probe_radius) ** 2
+        r2 = np.stack([r2] * n_samples)
+        
+        # If probe overlaps with just one atom around it, it becomes an insider
+        n_outsiders = np.sum(np.all(d2 >= (r2 * 0.99), axis=1))  # the 0.99 factor to account for numerical errors in the calculation of d2
+        # The surface area of ​​the sphere that is not occluded
+        area = 4 * np.pi * ((radius + probe_radius) ** 2) * n_outsiders / n_samples
+        areas.append(area)
+
+        norm = 4 * np.pi * (radius + probe_radius)
+        normareas.append(area/norm)
+
+    return areas, normareas
+
 def read_mol2(mol2,drop_H=False):
     read_cont = 0
     qs = []

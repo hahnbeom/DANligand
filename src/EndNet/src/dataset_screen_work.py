@@ -24,6 +24,8 @@ class DataSet(torch.utils.data.Dataset):
                  max_subset = 5,
                  maxedge = 100000,
                  maxnode = 3000,
+                 drop_H = False,
+                 ligand_features='base',
                  debug=False):
         
         self.targets = targets
@@ -43,10 +45,12 @@ class DataSet(torch.utils.data.Dataset):
         self.edgek = edgek
         self.ntype = ntype
         self.pert = pert
+        self.ligand_features = ligand_features
         self.randomize = randomize
         self.maxedge = maxedge
         self.maxnode = maxnode
         self.max_subset = max_subset
+        self.drop_H = drop_H
             
     def __len__(self):
         return len(self.targets)
@@ -70,13 +74,21 @@ class DataSet(torch.utils.data.Dataset):
         if ligands[0] == 'batch':
             # randomly select from mol2
             mol2type = 'batch'
+
             mol2f_a = parentpath+'/%s.active.mol2'%pname
-            active = myutils.read_mol2_batch(mol2f_a,tags_read=ligands[1:],tag_only=True)[-1]
-            active = [np.random.choice(active)] #one
-            
+            if os.path.exists(mol2f_a):
+                active = myutils.read_mol2_batch(mol2f_a,tags_read=ligands[1:],tag_only=True)[-1]
+                active = [np.random.choice(active)] #one
+            else:
+                active = []
+
             mol2f = parentpath+'/%s.ligand.mol2'%pname #active+decoy concat
-            ligands = myutils.read_mol2_batch(mol2f,tag_only=True)[-1] # override ligand
             keyatomf = parentpath+'/%s.keyatom.def.npz'%pname #GridNet.ChemBl/{target}.keyatom.def.npz
+            
+            if "batch" in ligands and len(ligands) <= 2:
+                ligands = myutils.read_mol2_batch(mol2f,tag_only=True)[-1] # override ligand
+            else:
+                ligands = ligands[1:]
                 
         else:
             # place target-ligand at the first
@@ -111,7 +123,8 @@ class DataSet(torch.utils.data.Dataset):
             
             cats = torch.tensor(cats).float()
             mask = torch.tensor(mask).float()
-       
+
+        origin = None
         try:
         #if True:
             t1 = time.time()
@@ -120,18 +133,22 @@ class DataSet(torch.utils.data.Dataset):
                 
                 #if len(ligands) > 0:
                 #blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, origin = self.read_by_single_mol2(target, ligands, keyatomf, mol2path=self.datapath)
-                
+
                 blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, origin = \
                     self.read_ligands(target, ligands, keyatomf, mol2path=mol2f, actives=active, mol2type=mol2type )
 
                 info['nK'] = [len(idx) for idx in keyidx_list]
-                    
+                info['ligands'] = ligands
+                info['atms'] = atms_list
+
             else:
                 gridchain = pname.split('.')[1]
                 gridname = pname.split('.')[2]
                 info['pname'] = pname+'.'+gridchain+'.'+gridname # overwrite
-                
-                origin = torch.tensor(np.mean(grids,axis=0)) # orient around grid center
+
+            #if origin == None:
+                #origin = torch.zeros(3)
+            origin = torch.tensor(np.mean(grids,axis=0)) # orient around grid center
 
             t2 = time.time()
             grids = grids - origin.squeeze().numpy()
@@ -179,11 +196,11 @@ class DataSet(torch.utils.data.Dataset):
 
         else:
             Glig_list, Gnat_list, keyidx_list, atms_list, tags_read = self.read_by_single_mol2(target, ligands, keyatomf, mol2path=mol2path)
-            tags_read = ligands
+            #tags_read = ligands #why was this here?
             
         blabel_list = [(1 if tag in actives else 0) for tag in tags_read]
         Gnat, keyxyz = None, None
-        origin = np.zeros(3)
+        origin = None
         
         if len(actives) > 0:
             inat = ligands.index(actives[0])
@@ -192,6 +209,9 @@ class DataSet(torch.utils.data.Dataset):
             origin = torch.mean(Gnat.ndata['x'],axis=0) # 1,3
             Gnat.ndata['x'] = Gnat.ndata['x'] - origin # move lig to origin
             keyxyz = Gnat.ndata['x'][keyidx_list[inat]] # K x 3
+        else:
+            keyxyz = torch.zeros((4,3))
+            #origin = torch.mean(Glig_list[0].ndata['x'],axis=0) # 1,3
 
         return blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, origin
 
@@ -215,12 +235,13 @@ class DataSet(torch.utils.data.Dataset):
                                                     dcut=self.edgedist[1], #unused
                                                     read_alt_conf=confmol2,
                                                     mode=self.edgemode,top_k=self.edgek[0],
-                                                    drop_H=False)
+                                                    drop_H=self.drop_H,
+                                                    input_features=self.ligand_features)
 
             if Glig == None or not atms:
                 print("skip %s for ligand read failure %s"%(target,mol2),file=sys.stderr)
                 continue
-            
+
             #if random.random() < self.noiseP:
             #    Glig, randoms = give_noise_to_lig(Glig)
 
@@ -245,7 +266,7 @@ class DataSet(torch.utils.data.Dataset):
         atms_list = []
         #keyxyz_list = []
 
-        (elems,_,bonds,borders,xyz,nneighs,atms,atypes,tags) = myutils.read_mol2_batch(mol2, tags_read=tags)
+        (elems,_,bonds,borders,xyz,nneighs,atms,atypes,tags) = myutils.read_mol2_batch(mol2, drop_H=self.drop_H, tags_read=tags)
 
         tags_processed = []
         for e,b,o,x,n,a,at,tag in zip(elems,bonds,borders,xyz,nneighs,atms,atypes,tags):
@@ -260,15 +281,14 @@ class DataSet(torch.utils.data.Dataset):
                 tags_processed.append(tag)
 
                 args = e,_,b,o,x,n,a,at
-                Glig = generate_ligand_graph(args, mode=self.edgemode, top_k=self.edgek[0])
+                Glig = generate_ligand_graph(args, mode=self.edgemode, top_k=self.edgek[0],
+                                             input_features=self.ligand_features)
             
-                atms_list.append(a)
+                com = torch.mean(Glig.ndata['x'],axis=0) # 1,3
+                #print("com, batch", com)
+                Glig.ndata['x'] = Glig.ndata['x'] - com # move lig to origin
                 
-                #keyxyz = Glig.ndata['x'][keyidx] # K x 3
-                #keyxyz_list.append(keyxyz)
-                #x = Glig.ndata['x']
-                #if randrot:
-                #    Glig = myutils.RandRG(Glig)
+                atms_list.append(a)
                 
                 Glig_list.append(Glig)
 
@@ -533,15 +553,15 @@ def find_dist_neighbors(dX,mode='dist',top_k=8,dcut=4.5):
     
 def ligand_graph_from_mol2(mol2,dcut,
                            read_alt_conf=None,mode='dist',
-                           top_k=16,drop_H=True):
+                           top_k=16,drop_H=True,
+                           input_features='base'):
     t0 = time.time()
     xyz_alt = []
     try:
         if read_alt_conf != None:
             xyz_alt,atms = myutils.read_mol2s_xyzonly(read_alt_conf)
             
-        #args = myutils.read_mol2(mol2,drop_H=drop_H)
-        args = read_mol2(mol2)
+        args = read_mol2(mol2, drop_H=drop_H)
     except:
         #args = myutils.read_mol2(mol2,drop_H=drop_H)
         print("failed to read mol2", mol2)
@@ -560,14 +580,14 @@ def ligand_graph_from_mol2(mol2,dcut,
         args[4] = xyz
     
     Glig = generate_ligand_graph(args,
-                                 mode=mode, top_k=top_k)
+                                 mode=mode, top_k=top_k, input_features=input_features)
     
     Gnat = copy.deepcopy(Glig)
     Gnat.ndata['x'] = torch.tensor(xyz_nat).float()[:,None,:]
     
     return Glig, Gnat, atms
 
-def read_mol2(mol2):
+def read_mol2(mol2, drop_H=False):
     read_cont = 0
     qs = []
     elems = []
@@ -628,8 +648,10 @@ def read_mol2(mol2):
             nneighs[i][l] += 1.0
 
     # drop hydrogens
-    #nonHid = [i for i,a in enumerate(elems) if a != 'H']
-    nonHid = [i for i,a in enumerate(elems)]
+    if drop_H:
+        nonHid = [i for i,a in enumerate(elems) if a != 'H']
+    else:
+        nonHid = [i for i,a in enumerate(elems)]
 
     bonds = [[i,j] for i,j in bonds if i in nonHid and j in nonHid]
     borders = [b for b,ij in zip(borders,bonds) if ij[0] in nonHid and ij[1] in nonHid]
@@ -637,7 +659,8 @@ def read_mol2(mol2):
     return np.array(elems)[nonHid], np.array(qs)[nonHid], bonds, borders, np.array(xyzs)[nonHid], np.array(nneighs)[nonHid], atms, atypes #np.array(atms)[nonHid]
 
 def generate_ligand_graph(args,
-                          top_k=16, dcut=5.0, mode='dist'):
+                          top_k=16, dcut=5.0, mode='dist',
+                          input_features='base'):
 
     elems, qs, bonds, borders, xyz, nneighs, atms, atypes = args
     X = torch.tensor(xyz[None,]) #expand dimension
@@ -658,6 +681,11 @@ def generate_ligand_graph(args,
     elems1hot = np.eye(len(myutils.ELEMS))[elems] # 1hot encoded
     obt.append(elems1hot)
     obt.append(nneighs)
+    # "base" up to here
+    if input_features == 'ex1':
+        sasa = myutils.atomic_sasa(xyz, elems)
+        obt.append(sasa)
+        obt.append(qs)
     
     # just dummy placeholder for trsf learning
     #key1hot = np.zeros((len(elems),4))
@@ -801,10 +829,10 @@ def collate(samples):
         masks = None
     else:
         cats = torch.stack(cats,dim=0).squeeze()
-        masks = torch.stack(masks,dim=0).float().squeeze()
         if len(cats.shape) == 2: cats = cats[None,] # B x N x T
+        masks = torch.stack(masks,dim=0).float().squeeze()
         if len(masks.shape) == 1: masks = masks[None,:] # B x M
-
+        
     # concat info into torch
     info = {key:[] for key in _info[0]}
     for args in _info:
@@ -821,16 +849,14 @@ def collate(samples):
 
     if is_ligand:
         Glig = dgl.batch(s[1])
-        #print([g.gdata.shape for g in s[1]])
         gdata = torch.stack([g.gdata for g in s[1]])
         setattr( Glig, "gdata", gdata ) #batched
-        
-        try:
+
+        try: 
             keyxyz = s[4].squeeze()[None,:,:]
+            keyidx = [torch.eye(n)[idx] for n,idx in zip(Glig.batch_num_nodes(),s[5])]
         except:
             return 
-        
-        keyidx = [torch.eye(n)[idx] for n,idx in zip(Glig.batch_num_nodes(),s[5])]
         blabel = torch.tensor(s[6],dtype=float)
         info['nK'] = torch.tensor(info['nK'])
 
@@ -843,6 +869,5 @@ def collate(samples):
     #if Glig != None:
     #    print("!", Glig.batch_num_nodes())
     
-    #print("size", Grec.number_of_nodes(), Glig.number_of_nodes(), s[5])
     return Grec, Glig, cats, masks, keyxyz, keyidx, blabel, info
     

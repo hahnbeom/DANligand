@@ -96,7 +96,8 @@ def structural_loss( Yrec, Ylig, nK ):
     return loss1_sum, mae
 
 ###
-def spread_loss(Ylig, A, grid, nK, sig=2.0): #Ylig:label(B x K x 3), A:attention (B x Nmax x K)
+def spread_loss(Ylig, A, grid, nK, sig=2.0): #Ylig:label(B x K x 3), A:attention (B x Nmax x K), grid: B x Nmax x 3
+    # actually B == 1
     loss2 = torch.tensor(0.0)
 
     for b, (x,k) in enumerate( zip(grid, nK) ): #ngrid: B x maxn
@@ -111,7 +112,27 @@ def spread_loss(Ylig, A, grid, nK, sig=2.0): #Ylig:label(B x K x 3), A:attention
 
         loss2 = loss2 - torch.sum(overlap*z)
 
-    loss2 = -torch.sum(overlap*z)
+    #loss2 = -torch.sum(overlap*z)
+
+    return loss2 # max -(batch_size x K)
+
+# penalty 
+#Ylig:label(B x K x 3), A:attention (B x Nmax x K), grid: B x Nmax x 3
+def spread_loss2(Ylig, A, grid, nK, sig=2.0): 
+    # actually B == 1
+    loss2 = torch.tensor(0.0)
+
+    for b, (x,k) in enumerate( zip(grid, nK) ): #ngrid: B x maxn
+        n = x.shape[0]
+        z = A[0,:n,:k] # N x K
+        x = x[:,None,:] # N x 1 x 3
+        
+        dX = (x-Ylig)/sig # N x K x 3
+        dev = torch.sum(dX*dX, axis=-1) # N x K
+        
+        if z.shape[0] != dev.shape[0]: continue
+
+        loss2 = loss2 + torch.sum(dev*z)
 
     return loss2 # max -(batch_size x K)
 
