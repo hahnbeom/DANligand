@@ -1,6 +1,16 @@
 import torch
 
-ScreeningLoss = torch.nn.BCEWithLogitsLoss() 
+ScreeningLoss = torch.nn.BCEWithLogitsLoss()
+def ScreeningContrastLoss( embs, blabel, nK ):
+    # embs: B x k
+    # blabel: B
+    # what should be ideal value
+    loss = torch.tensor(0.0).to(embs.device)
+    for emb,l,n in zip(embs,blabel,nK): #different number of Ks
+        diff = emb[:n] - l
+        loss = loss + torch.dot(diff,diff) # 0 or 1
+
+    return loss
 
 ### loss calculation functions
 def grouped_cat(cat):

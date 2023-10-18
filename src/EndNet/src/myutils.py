@@ -52,20 +52,22 @@ def make_pdb(atms,xyz,outf,header=""):
         out.write(header)
         
     #ATOM      1  N   VAL A  33     -15.268  78.177  37.050  1.00 92.09      A    N
-    form = "HETATM %5d %-3s UNK X %3d   %8.3f %8.3f %8.3f 1.00  0.00\n"
+    form = "HETATM %5d%-4s UNK X %3d   %8.3f %8.3f %8.3f 1.00  0.00\n"
     for i,(atm,x) in enumerate(zip(atms,xyz)):
         #out.write("%-3s  %8.3f %8.3f %8.3f\n"%(atm,x[0],x[1],x[2]))
+        if len(atm) < 4:
+            atm = ' '+atm
+        else:
+            atm = atm[3]+atm[:3]
         out.write(form%(i,atm,1,x[0],x[1],x[2]))
 
     if header != "":
         out.write("ENDMDL\n")
     out.close()
 
-def generate_pose(Y, keyidx, xyzfull, atms=[], epoch=0, report=False):
-    make_pdb(atms,xyzfull,"init.pdb")
+def generate_pose(Y, keyidx, xyzfull, atms=[], prefix=None):
     Yp = xyzfull[keyidx]
     # find rotation matrix mapping Y to Yp
-
     T = torch.mean(Yp - Y, dim=0)
 
     com = torch.mean(Yp,dim=0)
@@ -74,12 +76,17 @@ def generate_pose(Y, keyidx, xyzfull, atms=[], epoch=0, report=False):
     Z = xyzfull - com
     T = torch.mean(Y - Yp, dim=0) + com
     
-    Z = torch.einsum( 'ij,jk -> ik', Z, U.T) + T
+    Z = torch.einsum( 'ij,jk -> ik', Z, U.T) + T # aligned xyz
 
-    outf = "epoch%d.pdb"%epoch
-    if report: make_pdb(atms,Z,outf,header="MODEL %d\n"%epoch)
-    
-
+    if prefix != 'None':
+        make_pdb(atms,xyzfull,"%s.input.pdb"%prefix)
+        if isinstance(keyidx,torch.Tensor):
+            keyidx = keyidx.cpu().detach().numpy()
+            
+        make_pdb(atms[keyidx],Y,'%s.predkey.pdb'%prefix)
+        make_pdb(atms, Z, "%s.al.pdb"%prefix) #''',header="MODEL %d\n"%epoch''')
+        
+    return rms, atms[keyidx]
 
 def report_attention(grids, A, epoch, modelname):
     K=A.shape[1]
@@ -130,52 +137,64 @@ def show_how_attn_moves(Z, epoch):
     plt.tight_layout()
     # plt.show()
     plt.savefig('../plotpngs/epoch_%d.png'%epoch)
-
     print('plotpngs/epoch_%d.png with %d points saved'%(epoch,int(len(Z))))
 
-def get_points_on_sphere(center=(0., 0., 0.), radius=1., n=100):
-    pts = []
-
-    inc = np.pi * (3 - np.sqrt(5)) # increment
-    off = 2 / n
-
-    for k in range(n):
-        y = k * off - 1 + (off / 2)
-        r = np.sqrt(1 - y * y)
-        phi = k * inc
-        pts.append([np.cos(phi) * r, y, np.sin(phi) * r])
-
-    pts = np.array(pts) * radius + np.array(center)
-    return pts
+def sasa_from_xyz(xyz, elems, probe_radius=1.4, n_samples=50):
+    import scipy
     
-def atomic_sasa(xyz, elems, probe_radius=1.4, n_samples=100):
+    atomic_radii = {"C":  2.0,"N": 1.5,"O": 1.4,"S": 1.85,"H": 0.0, #ignore hydrogen for consistency
+                    "F": 1.47,"Cl":1.75,"Br":1.85,"I": 2.0,'P': 1.8}
+    
     areas = []
     normareas = []
     centers = xyz
-    radii = radii_by_elem(elems)
+    radii = np.array([atomic_radii[e] for e in elems])
     n_atoms = len(elems)
-        
-    expanded_center = np.expand_dims(np.array(centers), axis=0).repeat(n_samples, axis=0)
-    for center, radius in zip(centers, radii):
-        pts = get_points_on_sphere(center=center,
-                                   radius=(radius + probe_radius),
-                                   n=n_samples)
 
-        pts = pts.repeat(n_atoms, 0).reshape(n_samples, n_atoms, 3) 
-        d2 = np.sum((pts - expanded_center) ** 2, axis=2) # Here. time-consuming line
-        r2 = (np.array(radii) + probe_radius) ** 2
-        r2 = np.stack([r2] * n_samples)
+    inc = np.pi * (3 - np.sqrt(5)) # increment
+    off = 2.0/n_samples
+
+    pts0 = []
+    for k in range(n_samples):
+        phi = k * inc
+        y = k * off - 1 + (off / 2)
+        r = np.sqrt(1 - y*y)
+        pts0.append([np.cos(phi) * r, y, np.sin(phi) * r])
+    pts0 = np.array(pts0)
+
+    kd = scipy.spatial.cKDTree(xyz)
+    neighs = kd.query_ball_tree(kd, 8.0)
+
+    occls = []
+    for i,(neigh, center, radius) in enumerate(zip(neighs, centers, radii)):
+        neigh.remove(i)
+        n_neigh = len(neigh)
+        center_exp = center[None,:].repeat(n_neigh,axis=0)
+        d2cen = np.sum( (center_exp - xyz[neigh]) ** 2, axis=1)
+        occls.append(d2cen)
         
+        pts = pts0*(radius+probe_radius) + center
+        n_neigh = len(neigh)
+        
+        x_neigh = xyz[neigh][None,:,:].repeat(n_samples,axis=0)
+        pts = pts.repeat(n_neigh, 0).reshape(n_samples, n_neigh, 3)
+        
+        d2 = np.sum((pts - x_neigh) ** 2, axis=2) # Here. time-consuming line
+        r2 = (radii[neigh] + probe_radius) ** 2
+        r2 = np.stack([r2] * n_samples)
+
         # If probe overlaps with just one atom around it, it becomes an insider
         n_outsiders = np.sum(np.all(d2 >= (r2 * 0.99), axis=1))  # the 0.99 factor to account for numerical errors in the calculation of d2
-        # The surface area of ​​the sphere that is not occluded
+        # The surface area of   the sphere that is not occluded
         area = 4 * np.pi * ((radius + probe_radius) ** 2) * n_outsiders / n_samples
         areas.append(area)
 
         norm = 4 * np.pi * (radius + probe_radius)
-        normareas.append(area/norm)
+        normareas.append(min(1.0,area/norm))
 
-    return areas, normareas
+    occls = np.array([np.sum(np.exp(-occl/6.0),axis=-1) for occl in occls])
+    occls = (occls-6.0)/3.0 #rerange 3.0~9.0 -> -1.0~1.0
+    return areas, np.array(normareas), occls
 
 def read_mol2(mol2,drop_H=False):
     read_cont = 0

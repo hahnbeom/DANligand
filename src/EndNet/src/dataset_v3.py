@@ -51,6 +51,15 @@ class DataSet(torch.utils.data.Dataset):
         self.maxnode = maxnode
         self.max_subset = max_subset
         self.drop_H = drop_H
+        self.crossactives = []
+        self.decoys = []
+        
+        if os.path.exists('data/crossreceptor.npz'):
+            self.crossactives = np.load('data/crossreceptor.npz',allow_pickle=True)['crossrec'].item()
+        
+        if os.path.exists('data/decoys.npz'):
+            self.decoys = np.load('data/decoys.npz',allow_pickle=True)['decoys'].item()
+
             
     def __len__(self):
         return len(self.targets)
@@ -69,8 +78,9 @@ class DataSet(torch.utils.data.Dataset):
         propnpz = parentpath+pname+".prop.npz"
         
         is_ligand = self.is_ligand[index]
-        
-        ligands, eval_struct, mol2f, mol2type = self.parse_ligands(pname, self.ligands[index], parentpath)
+
+        ligands, eval_struct, mol2f, mol2type = self.parse_ligands(target, self.ligands[index], parentpath)
+        t1 = time.time()
 
         keyatomf = parentpath+'/keyatom.def.npz' 
         if os.path.exists(parentpath+'/%s.keyatom.def.npz'%pname):
@@ -102,7 +112,7 @@ class DataSet(torch.utils.data.Dataset):
         origin = None
         try:
         #if True:
-            t1 = time.time()
+            t2 = time.time()
             if is_ligand:
                 gridchain = None
 
@@ -123,7 +133,7 @@ class DataSet(torch.utils.data.Dataset):
                 #origin = torch.zeros(3)
             origin = torch.tensor(np.mean(grids,axis=0)) # orient around grid center
 
-            t2 = time.time()
+            t3 = time.time()
             grids = grids - origin.squeeze().numpy()
             Grec, grids = receptor_graph_from_structure(propnpz, grids, origin,
                                                         edgemode=self.edgemode,
@@ -133,7 +143,7 @@ class DataSet(torch.utils.data.Dataset):
                                                         gridchain=gridchain,
                                                         randomize=self.randomize,
                                                         features=self.input_features)
-            t3 = time.time()
+            t4 = time.time()
 
             if Grec == None:
                 print(f"Receptor num nodes exceeds max cut 3000")
@@ -154,33 +164,45 @@ class DataSet(torch.utils.data.Dataset):
         info['grididx'] = np.where(Grec.ndata['attr'][:,0]==1)[0] #aa=unk type
         info['grid'] = grids
         info['eval_struct'] = eval_struct
-        t4 = time.time()
+        t9 = time.time()
+        #print(target, t1-t0, t2-t1, t3-t2, t4-t3, t9-t0)
         
         return Grec, Glig_list, cats, mask, keyxyz, keyidx_list, blabel_list, info #label
 
     def parse_ligands(self, target, ligands, parentpath):
         pname = target.split('/')[-1]
-        
-        if len(ligands) == 4 and (ligands[0] in ['single','batch']): # generic logic
+
+        t0 = time.time()
+        if len(ligands) == 4 and isinstance(ligands,tuple): # generic logic
             mol2type, mol2f, activemol, decoyf = ligands
             
             if mol2type == 'single':  #"single-style"
                 if mol2f.endswith('.npz'): # random selection
-                    actives = np.load(mol2f,allow_pickle=True).item()[pname]
-                    active = [np.random.choice(actives)]
+                    Pself = float(activemol)
+                    #actives = np.load(mol2f,allow_pickle=True)['crossrec'].item()
+                    actives = self.crossactives[pname]
+                    if pname in actives and (np.random.rand() > Pself): 
+                        active = [np.random.choice(actives)]
+                    else:
+                        active = [target] # self
                 else:
                     active = [activemol]
                 mol2f = self.datapath #actual mol2s are datapath+/+ligand+'.mol2'
-            elif mol2type == 'batch': #"batched-style"
-                mol2f = parentpath+mol2f
-                active = [np.random.choice(active)]
 
+            elif mol2type == 'batch': #"batched-style"
+                mol2f = self.datapath+mol2f
+                active = [activemol]
+            else:
+                sys.exit("no such mol2type known: %s"%mol2type)
+            t1 = time.time()
             if decoyf.endswith('.npz'):
-                decoys = np.load(decoyf,allow_pickle=True).item()[pname]
+                #decoys = np.load(decoyf,allow_pickle=True)['decoys'].item()[pname]
+                decoys = self.decoys[pname]
             elif decoyf.endswith('.mol2'): #random selection among
-                decoyf = parentpath+decoyf
+                decoyf = self.datapath+decoyf
                 decoys = myutils.read_mol2_batch(decoyf,tag_only=True)[-1]
-            
+            t2 = time.time()
+
         elif ligands[0] == 'batch': # old style support
             # randomly select from mol2
             mol2type = 'batch'
@@ -188,10 +210,17 @@ class DataSet(torch.utils.data.Dataset):
             active = myutils.read_mol2_batch(mol2f_a,tags_read=ligands[1:],tag_only=True)[-1]
             active = [np.random.choice(active)] #one
             
-            mol2f_d = parentpath+'/%s.decoy.mol2'%pname #active+decoy concat
-            decoys = myutils.read_mol2_batch(mol2f_d,tag_only=True)[-1] # override ligand
-                
+            mol2f_d = parentpath+'/%s.decoy.mol2'%pname #decoy only
             mol2f = parentpath+'/%s.ligand.mol2'%pname #active+decoy concat
+            
+            if os.path.exists(mol2f_d):
+                decoys = myutils.read_mol2_batch(mol2f_d,tag_only=True)[-1] # override ligand
+                
+        elif ligands[0] == 'infer': # old style support
+            mol2type = 'batch'
+            mol2f = parentpath+'/%s.ligand.mol2'%pname #active+decoy concat
+            active = []
+            decoys = ligands
             
         else: # old style
             mol2type = 'single'
@@ -206,8 +235,12 @@ class DataSet(torch.utils.data.Dataset):
         ligands = active + decoys
 
         eval_struct = False
-        if target == active[0]:
+        if active != [] and target == active[0]:
             eval_struct = True
+
+        # check inputs are there
+        if not os.path.exists(mol2f):
+            print(f"no such file exists {molf2}")
 
         return ligands, eval_struct, mol2f, mol2type
 

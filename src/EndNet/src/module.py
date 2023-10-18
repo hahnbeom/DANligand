@@ -201,6 +201,14 @@ class ClassModule( nn.Module ):
             self.linear_z1 = nn.Linear(c, 1)
             self.map_to_L = nn.Linear( 2*c+n_lig_emb , 8 )
             self.final_linear = nn.Linear( 8, 1 )
+
+        elif self.classification_mode == 'former_contrast':
+            self.linear_lig = nn.Linear(n_lig_emb, 1)
+            self.Affmap = nn.Parameter( torch.rand(m) )
+            self.Pcoeff = nn.Parameter( torch.Tensor([5.0]) )
+            self.Poff   = nn.Parameter( torch.Tensor([-1.0]) )
+            
+            self.Gamma = nn.Parameter( torch.Tensor([0.1]) )
             
         elif self.classification_mode == 'tank':
             # attention matrix to affinity 
@@ -242,6 +250,43 @@ class ClassModule( nn.Module ):
             pair_rep = torch.cat([key_rep, grid_rep, lig_rep ],dim=1) # b x emb*2
             pair_rep = self.map_to_L(pair_rep) # b x L
             Aff = self.final_linear(pair_rep).squeeze(-1) # b x 1
+            
+        elif self.classification_mode == 'former_contrast':
+            exp_z = torch.exp(z) 
+            zg_denom = exp_z.sum(axis=(-2)).unsqueeze(-2) # b x N x 1 x d
+            zg = torch.div(exp_z,zg_denom) # b x N x K x d; "per-NK weight, receptor version"
+            zk_denom = exp_z.sum(axis=(-3)).unsqueeze(-3) # b x N x 1 x d
+            zk = torch.div(exp_z,zk_denom) # b x N x K x d; "per-NK weight, ligand version"
+            #zl = torch.sum( ) # b x N 
+            
+            # normalized embedding
+            hs_grid_batched = torch.softmax(hs_grid_batched, axis=-1)
+            hs_key_batched  = torch.softmax(hs_key_batched, axis=-1)
+            
+            Affmap = self.Affmap / torch.mean(self.Affmap) # normalize so that sum be channel-dimx
+            # derive dot product to binders to be at 1.0, non-binders at 0.0
+            Aff_contrast = torch.einsum( 'bkd,d->bk', hs_key_batched, Affmap ) # B x k
+
+            # "attention-weighted 1-D probability"
+            #Grid_P = torch.einsum('bnkd,bnd -> bk', zg, hs_grid_batched) # unused
+            # opt1
+            key_P = torch.einsum('bnkd,bkd -> bnk', z, hs_key_batched)
+            key_P = nn.functional.max_pool2d(key_P,kernel_size=(key_P.shape[-2],1)) # B x k #max per each key across grid
+
+            aff_key = self.Pcoeff*(key_P + self.Poff)
+
+            # mean except masked keys
+            aff_key = torch.sum(aff_key*w_mask,axis=(1,2))/torch.sum(w_mask,axis=1)
+            aff_lig = self.linear_lig( lig_rep ).squeeze() # [-1,1]; B x 1
+
+            Aff = ( aff_key + self.Gamma*aff_lig )/(1+self.Gamma)
+            #print( float(self.Pcoeff), float(self.Poff),
+            #       aff_key.detach().cpu().numpy(), aff_lig.detach().cpu().numpy() )
+            #print( torch.mean(key_P,axis=(1,2)).squeeze().detach().cpu().numpy() )
+            Aff = ( Aff, Aff_contrast )
+            #
+            #pair_rep = torch.cat([key_rep, grid_rep, lig_rep ],dim=1) # b x (k+m)
+            #pair_rep = self.map_to_L(pair_rep) # b x L
             
         else:
             exp_z = torch.exp(z) 
@@ -307,8 +352,6 @@ class ClassModule( nn.Module ):
                     
                 pair_rep = self.map_to_L(pair_rep) # b x L
                 Aff = self.final_linear(pair_rep).squeeze(-1) # b x 1
-
-                
             
         return Aff
             

@@ -67,32 +67,6 @@ class XformModule( nn.Module ):
         self.linear2 = nn.Linear(c, c)
 
     def forward( self, V, Q, z, z_mask, dim ):
-        ''' # from j2ho
-            exp_z = torch.exp(z) 
-            # soft alignment 
-            # normalize each row of z for receptor counterpart
-            zr_denom = exp_z.sum(axis=(-2)).unsqueeze(-2) # 1 x Nrec x 1 x c
-            zr = torch.div(exp_z,zr_denom) # 1 x Nrec x K x c; "per-NK weight, receptor version"
-            ra = zr*hs_key_batched.unsqueeze(1) # 1 x Nrec x K x c
-            ra = ra.sum(axis=-2) # 1 x Nrec x c
-            
-            # normalize each row of z for ligand counterpart
-            zl_denom = exp_z.sum(axis=(-3)).unsqueeze(-3) # 1 x Nrec x 1 x c
-            zl = torch.div(exp_z,zl_denom) # 1 x Nrec x K x c; "per-NK weight, ligand version"
-            zl_t = torch.transpose(zl, 1, 2) # 1 x K x Nrec x c
-
-            la = zl_t*hs_grid_batched.unsqueeze(1) # 1 x K x Nrec x numchannel
-            la = la.sum(axis=-2) # 1 x K x numchannel
-            ra_rh = (self.wra(ra) + self.wrh(hs_grid_batched))
-            la_lh = (self.wla(la) + self.wlh(hs_key_batched)) # b x K x emb
-            att = (self.linear_z1(z)).squeeze(-1) # b x Ngrid x K
-            att_l = torch.nn.Softmax(dim=2)(att).sum(axis=1) # b x K
-            att_r = torch.nn.Softmax(dim=1)(att).sum(axis=2) # b x Ngrid
-
-            key_rep = torch.einsum('bk,bkl -> bl', att_l, la_lh)
-            grid_rep = torch.einsum('bk,bkl -> bl',att_r, ra_rh)
-        '''
-
         # attention provided, not Q*K
         # z:  B x N x K x c
         # below assumes dim=2 (K-dimension)
@@ -130,6 +104,7 @@ class EndtoEndModel(nn.Module):
                                         args.params_TR['c'] )
 
         self.n_trigon_key_layers = args.params_TR['n_trigon_key_layers']
+
         self.trigon_key = TrigonModule( 1,
                                         args.params_TR['m'],
                                         args.params_TR['c'])
@@ -227,26 +202,24 @@ class EndtoEndModel(nn.Module):
         #TODO
         h_grid_batched = h_grid_batched.repeat(h_key_batched.shape[0],1,1)
         for it in range(self.n_trigon_key_layers):
+            
+            # move from below to here so that h shares embedding w/ structure...
+            # would it make difference?
+            # update key/grid features using learned attention
+            h_key_batched  = self.XformKey( h_key_batched, h_grid_batched, z, z_mask, dim=2 ) # key/query/attn
+            h_grid_batched = self.XformGrid( h_grid_batched, h_key_batched, z, z_mask, dim=1 ) # key/query/attn
+            
             z = self.trigon_key( h_grid_batched, h_key_batched, z_mask,
                                  D_grid, D_key,
                                  drop_out=drop_out )
 
             z_mask = torch.einsum('bn,bm->bnm', grid_mask, key_mask )
-            # B x K x 3, B x N x K x d 
+            # Ykey_s: B x K x 3; z_norm: B x N x K x d
+            # z: B x N x K x d; z_norm: B x N x K (&softmaxed)
             Ykey_s, z_norm = self.struct_module( z, z_mask, Ggrid, key_mask )
 
-            # update key/grid features using learned attention
-            h_key_batched  = self.XformKey( h_key_batched, h_grid_batched, z, z_mask, dim=2 ) # key/query/attn
-            h_grid_batched = self.XformGrid( h_grid_batched, h_key_batched, z, z_mask, dim=1 ) # key/query/attn
-            # converge here??
-            #print("key", it, h_key_batched[0], h_key_batched[1])
-            #print("grid", it, h_grid_batched[0], h_grid_batched[1])
-            # z will be re updated above following updated h_key & h_grid
-            
         # 2-2) screening module
-
-        ## aff = linear_dxd( einsum( 'bnkd,bkd->bk', z, h_key_batched ) )
         aff = self.class_module( z, h_grid_batched, h_key_batched,
-                                 lig_rep=h_lig_global )#, rec_rep=None )
+                                 lig_rep=h_lig_global, w_mask=key_mask )
             
         return Ykey_s, z_norm, cs, aff
