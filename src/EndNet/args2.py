@@ -85,7 +85,7 @@ class Argument:
         self.params_TR['l0_out_features_lig'] = m
         self.classification_mode = "ligand_v2"
         self.LR = 1.0e-4
-        self.wTR = 1.0
+        self.wTR = 0.2
         self.wGrid = 1.0
         self.w_reg = 1e-10
         self.w_contrast = 2.0 # divided by ngrid
@@ -98,13 +98,15 @@ class Argument:
         self.datasetf = 'data/PLmix.60k.screen.txt'
         self.n_lig_emb = 4 # concatenated w/  other m embeddings
         self.input_features = 'base'
+        self.pert = False
 
-    def ligfeat(self, feat):
+    def feattype(self, feat):
         if feat == 'base':
             pass
         elif feat == 'ex1':
             self.input_features = feat
-            self.params_ligand['l0_in_features'] = 17 #+q, sasa
+            self.params_ligand['l0_in_features'] = 18 #+q, sasa, occl
+            self.params_grid['l0_in_features'] = 104 #+q, occl
 
 args_base = Argument( 0.1 )
 args_base.modelname = 'base' 
@@ -180,8 +182,31 @@ args_formerNR_scratch.modelname = 'former_nrbS'
 
 args_ex1 = copy.deepcopy(args_formerNR)
 args_ex1.modelname = 'former_ex1'
-args_ex1.ligfeat("ex1")
+args_ex1.datasetf = ['data/AddChembl.NR2.train.txt','data/AddChembl.NR2.valid.txt']
+args_ex1.feattype("ex1")
 
-args_formerNR_debug = copy.deepcopy(args_monitor)
-args_formerNR_debug.modelname = 'debug'
-args_formerNR_debug.datasetf = 'data/debug.txt'
+args_ex1T = copy.deepcopy(args_ex1)
+args_ex1T.modelname = 'former_ex1T'
+args_ex1T.LR = 1.0e-6
+args_ex1T.datasetf = ['data/ChemblOnly.NR2.train.txt','data/AddChembl.NR2.valid.txt'] #'data/ChemblOnly.NR2.valid.txt']
+
+args_ex1rotT = copy.deepcopy(args_ex1T)
+args_ex1rotT.modelname = 'former_ex1rotT'
+#args_ex1rotT.LR = 1.0e-5
+
+args_ex1rot = copy.deepcopy(args_ex1)
+args_ex1rot.modelname = 'former_ex1rot'
+args_ex1rot.pert = True
+
+#========================
+args_cross = copy.deepcopy(args_ex1rot)
+args_cross.modelname = 'former_cross'
+args_cross.datasetf = ['data/v3.train.txt','data/v3.valid.txt'] #'data/ChemblOnly.NR2.valid.txt']
+args_cross.wTR = 0.1
+args_cross.w_screen = 10.0 # removed 0.2 front so effectively 50.0 in previous unit
+
+args_crossT = copy.deepcopy(args_cross)
+args_crossT.modelname = 'former_crossT'
+args_crossT.datasetf = ['data/v3.trainChemblOnly.txt','data/v3.validChemblOnly.txt'] 
+args_crossT.LR = 1.0e-6
+

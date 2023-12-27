@@ -4,7 +4,9 @@ import torch.utils.checkpoint as checkpoint
 
 from SE3.se3_transformer.model import SE3Transformer
 from SE3.se3_transformer.model.fiber import Fiber
-from src.trigon_2 import * 
+from src.trigon_2 import *
+from src.GAT import GATLayer
+from dgl.nn import EGATConv
 
 class Grid_SE3(nn.Module):
     """SE(3) equivariant GCN with attention"""
@@ -24,7 +26,7 @@ class Grid_SE3(nn.Module):
 
         self.se3 = SE3Transformer(
             num_layers   = num_layers_grid,
-            num_heads    = 4,
+            num_heads    = n_heads,
             channels_div = 4,
             fiber_in=fiber_in,
             fiber_hidden=Fiber({0: num_channels, 1:num_channels, 2:num_channels}),
@@ -67,7 +69,7 @@ class Ligand_SE3(nn.Module):
     def __init__(self, num_layers=2,
                  num_channels=32,
                  num_degrees=3,
-                 n_heads_se3=4,
+                 n_heads=4,
                  div=4,
                  l0_in_features=15,
                  l0_out_features=32,
@@ -87,7 +89,7 @@ class Ligand_SE3(nn.Module):
         # processing ligands
         self.se3 = SE3Transformer(
             num_layers   = num_layers,
-            num_heads    = n_heads_se3,
+            num_heads    = n_heads,
             channels_div = div,
             fiber_in=fiber_in,
             fiber_hidden=Fiber({0: num_channels, 1:num_channels, 2:num_channels}),
@@ -105,7 +107,88 @@ class Ligand_SE3(nn.Module):
         hs = self.se3(Glig, node_features, edge_features)['0'] # M x d x 1
         
         return hs.squeeze(-1)
+
+class Ligand_GAT(torch.nn.Module):
+    def __init__(self,
+                 l0_in_features,
+                 num_edge_features, ## unused... can we use?
+                 l0_out_features,
+                 num_layers,
+                 n_heads,
+                 num_channels,
+                 add_skip_connection=True,
+                 bias=True,
+                 dropout_rate=0.1):
         
+        super().__init__()
+
+        # linear projection
+        self.num_channels = num_channels
+        self.n_heads = n_heads
+        
+        gat_layers = []
+        #norm_layers = []
+        for i in range(num_layers):
+            '''layer = GATLayer(
+                num_in_features=num_channels,
+                num_out_features=num_channels,
+                num_of_heads=n_heads,
+                last_layer=(i==num_layers-1),
+                add_skip_connection=add_skip_connection,
+            )'''
+            layer = EGATConv(in_node_feats=num_channels,
+                             in_edge_feats=num_channels,
+                             out_node_feats=num_channels,
+                             out_edge_feats=num_channels,
+                             num_heads=n_heads
+            )
+            #norm = nn.InstanceNorm1d(num_channels)
+            gat_layers.append(layer)
+
+        self.initial_linear = nn.Linear(l0_in_features, num_channels)
+        self.initial_linear_edge = nn.Linear(num_edge_features, num_channels)
+        self.dropout = nn.Dropout(p=dropout_rate)
+        self.gat_net = nn.ModuleList( gat_layers )
+        self.final_linear = nn.Linear(num_channels, l0_out_features)
+        self.norm = nn.InstanceNorm1d(num_channels)
+
+    def forward(self, Glig ):
+        isolated = ((Glig.in_degrees()==0) & (Glig.out_degrees()==0)).nonzero().squeeze()
+        #print(len(isolated))
+        Glig.remove_nodes(isolated)
+        
+        in_node_features = self.dropout(Glig.ndata['attr'])
+        in_edge_features = self.dropout(Glig.edata['attr'])
+        edge_index = Glig.edges()
+
+        # project first
+        emb0 = self.initial_linear( in_node_features )
+        edge_emb0 = self.initial_linear_edge( in_edge_features )
+
+        #emb0 = emb0.view(-1, self.n_heads, self.num_channels)
+        #edge_emb = edge_emb.view(-1, self.n_heads, self.num_channels)
+        
+        emb = emb0
+        edge_emb = edge_emb0
+        for i,layer in enumerate(self.gat_net):
+            emb, edge_emb = layer( Glig, emb, edge_emb )
+            # should aggregate head dim
+            # mean pooling
+            emb = emb.mean(1)
+            edge_emb = edge_emb.mean(1)
+            
+            #print(i, emb.mean(), emb.std(), edge_emb.mean(), edge_emb.std() )
+            
+            emb = self.norm(emb)
+            edge_emb = self.norm(edge_emb)
+            
+            emb = torch.nn.functional.elu(emb)
+            edge_emb = torch.nn.functional.elu(edge_emb)
+            
+        # off if using dgl.nn
+        out = self.final_linear( emb )
+        return out
+    
 class TrigonModule(nn.Module):
     def __init__(self,
                  n_trigonometry_module_stack,
@@ -276,7 +359,7 @@ class ClassModule( nn.Module ):
             aff_key = self.Pcoeff*(key_P + self.Poff)
 
             # mean except masked keys
-            aff_key = torch.sum(aff_key*w_mask,axis=(1,2))/torch.sum(w_mask,axis=1)
+            aff_key = torch.sum(aff_key*w_mask,axis=(1,2))/(torch.sum(w_mask,axis=1) + 1.0e-6)
             aff_lig = self.linear_lig( lig_rep ).squeeze() # [-1,1]; B x 1
 
             Aff = ( aff_key + self.Gamma*aff_lig )/(1+self.Gamma)
@@ -354,4 +437,4 @@ class ClassModule( nn.Module ):
                 Aff = self.final_linear(pair_rep).squeeze(-1) # b x 1
             
         return Aff
-            
+

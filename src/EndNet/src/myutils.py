@@ -1,14 +1,34 @@
-import torch
 import numpy as np
 #import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, roc_auc_score
+import sys
+sys.path.insert(0,'/home/hpark/util3')
+from statistic import dat2distribution
 
 ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "empty node"
 
+def calc_AUC(Pt, Pf):
+    Tdstr = dat2distribution(Pt[t], 0.0, 1.0, 0.02)
+    Fdstr = dat2distribution(Pf[t], 0.0, 1.0, 0.02)
+    #for i,y in enumerate(Tdstr):
+    #    x = 0.02*(0.5+i)
+    #    print("%3d %4.2f %8.5f %8.4f"%(t,x,y,Fdstr[i]))
+    P = np.array(Tdstr)
+    Q = np.array(Fdstr)+0.00001
+    #KLdiv = np.sum(P*np.log(P/Q+0.00001))
+
+    label = [1.0 for _ in Pt[t]] + [0.0 for _ in Pf[t]]
+    score = Pt[t] + Pf[t]
+    auc = roc_auc_score(label, score)
+    #fpr, tpr, thrs = roc_curve(label, score)
+    return auc
+    
 def count_parameters(model):
     #print([p.numel() for p in model.parameters()])
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def to_cuda(x, device):
+    import torch
     if isinstance(x, torch.Tensor):
         return x.to(device)
     elif isinstance(x, tuple):
@@ -22,6 +42,7 @@ def to_cuda(x, device):
         return x.to(device=device)
 
 def rmsd(Y,Yp): # Yp: require_grads
+    import torch
     device = Y.device
     Y = Y - Y.mean(axis=0)
     Yp = Yp - Yp.mean(axis=0)
@@ -66,6 +87,7 @@ def make_pdb(atms,xyz,outf,header=""):
     out.close()
 
 def generate_pose(Y, keyidx, xyzfull, atms=[], prefix=None):
+    import torch
     Yp = xyzfull[keyidx]
     # find rotation matrix mapping Y to Yp
     T = torch.mean(Yp - Y, dim=0)

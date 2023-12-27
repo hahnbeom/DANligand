@@ -1,6 +1,14 @@
 import torch
 
 ScreeningLoss = torch.nn.BCEWithLogitsLoss()
+
+# null gives ~ 0.1 when n == 5;  p=(0.5,0.0...) -> loss ~ 0.0275; p=(0.0,1.0,0.0...) -> loss ~ 0.25; 
+def RankingLoss( ps, qs ): #p: pred q:
+    ps = torch.nn.functional.softmax(ps,dim=-1)
+    qs = torch.nn.functional.softmax(qs,dim=-1)
+    loss = torch.sum(ps*torch.log(ps/qs))
+    return loss
+
 def ScreeningContrastLoss( embs, blabel, nK ):
     # embs: B x k
     # blabel: B

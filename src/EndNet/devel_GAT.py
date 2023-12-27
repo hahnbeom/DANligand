@@ -12,10 +12,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.model_former import EndtoEndModel
 from src.myutils import count_parameters, to_cuda
-from src.dataset_v3 import collate, DataSet
+from src.dataset_v4 import collate, DataSet
 import src.Loss as Loss
 
-from args_devel import args_base as args
+from args_devel import args_GAT as args
 
 import warnings
 warnings.filterwarnings("ignore", message="sourceTensor.clone")
@@ -140,6 +140,7 @@ def load_data(txt, world_size, rank):
     target_s = []
     ligands_s = []
     is_ligand_s = []
+    decoy_npzs = []
     print(txt)
     for ln in open(txt,'r'):
         x = ln[:-1].split()
@@ -153,8 +154,10 @@ def load_data(txt, world_size, rank):
         is_ligand_s.append(is_ligand)
         target_s.append(target)
         ligands_s.append((mol2type,mol2f,activemol,decoyf))
+        if decoyf.endswith('.npz') and decoyf not in decoy_npzs:
+            decoy_npzs.append(decoyf)
         
-    data_set = DataSet(target_s, is_ligand_s, ligands_s, **set_params)
+    data_set = DataSet(target_s, is_ligand_s, ligands_s, decoy_npzs=decoy_npzs, **set_params)
 
     if ddp:
         sampler = data.distributed.DistributedSampler(data_set,num_replicas=world_size,rank=rank)
@@ -187,25 +190,34 @@ def train_model(rank,world_size,dumm):
         ## train
         if ddp:
             ddp_model.train()
-            temp_loss=train_one_epoch(ddp_model,optimizer,train_loader,rank,epoch,True)
+            temp_loss, Pt, Pf =train_one_epoch(ddp_model,optimizer,train_loader,rank,epoch,True)
         else:
             model.train()
-            temp_loss=train_one_epoch(model,optimizer,train_loader,rank,epoch,True)
+            temp_loss, Pt, Pf =train_one_epoch(model,optimizer,train_loader,rank,epoch,True)
             
         for k in train_loss:
             train_loss[k].append(np.array(temp_loss[k]))
-        optimizer.zero_grad()
         
+        auc_train, auc_valid = {},{}
+        for key in Pt:
+            if len(Pt) > 10:
+                auc_train[key] = calc_AUC(Pt,Pf)
+            
+        optimizer.zero_grad()
         ## evaluate
         with torch.no_grad():
             if ddp:
                 ddp_model.eval()
-                temp_loss = train_one_epoch(ddp_model,optimizer,valid_loader,rank,epoch,False)
+                temp_loss, Pt, Pf = train_one_epoch(ddp_model,optimizer,valid_loader,rank,epoch,False)
             else:
-                temp_loss = train_one_epoch(model,optimizer,valid_loader,rank,epoch,False)
+                temp_loss, Pt, Pf = train_one_epoch(model,optimizer,valid_loader,rank,epoch,False)
         
             for k in valid_loss:
                 valid_loss[k].append(np.array(temp_loss[k]))
+
+            for key in Pt:
+                if len(Pt) > 10:
+                    auc_valid[key] = calc_AUC(Pt,Pf)
 
         print("***SUM***")
         print("Train loss | %7.4f | Valid loss | %7.4f"%((np.mean(train_loss['total'][-1]),np.mean(valid_loss['total'][-1]))))
@@ -214,18 +226,25 @@ def train_model(rank,world_size,dumm):
         if rank==0:
             if np.min([np.mean(vl) for vl in valid_loss["total"]]) == np.mean(valid_loss["total"][-1]):
                 torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'valid_loss': valid_loss}, join("models", args.modelname, "best.pkl"))
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'train_loss': train_loss,
+                    'valid_loss': valid_loss,
+                    'auc_train': auc_train,
+                    'auc_valid': auc_valid,
+                }, join("models", args.modelname, "best.pkl"))
    
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': train_loss,
-                'valid_loss': valid_loss}, join("models", args.modelname, "model.pkl"))
+                'valid_loss': valid_loss,
+                'auc_train': auc_train,
+                'auc_valid': auc_valid,
+                
+            }, join("models", args.modelname, "model.pkl"))
 
 
 ### train_one_epoch
@@ -235,6 +254,9 @@ def train_one_epoch(model,optimizer,loader,rank,epoch,is_train):
     accum=1
     device=torch.device("cuda:%d"%rank if (torch.cuda.is_available()) else "cpu")
 
+    Pt = {'CHEMBL':[],'DUDE':[],'PDB':[]}
+    Pf = {'CHEMBL':[],'DUDE':[],'PDB':[]}
+    
     for i, inputs in enumerate(loader):
         if inputs == None:
             e_count += 1
@@ -317,6 +339,13 @@ def train_one_epoch(model,optimizer,loader,rank,epoch,is_train):
                         lossScreen = Loss.ScreeningLoss( aff[0], blabel )
                         lossScreenC = Loss.ScreeningContrastLoss( aff[1], blabel, nK )
                         Pbind = ['%4.2f'%float(a) for a in torch.sigmoid(aff[0])]
+
+                        key = 'PDB'
+                        if : key = 'CHEMBL'
+                        elif : key = 'DUDE'
+
+                        Pt[key].append(Pbind[0])
+                        Pf[key] += Pbind[1:]
                     except:
                         pass
                     
@@ -387,7 +416,7 @@ def train_one_epoch(model,optimizer,loader,rank,epoch,is_train):
                         
             b_count += 1
 
-    return temp_loss
+    return temp_loss, Pt, Pf
 
 ## main
 if __name__=="__main__":

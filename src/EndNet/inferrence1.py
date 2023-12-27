@@ -15,11 +15,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.model_former import EndtoEndModel
 from src.myutils import count_parameters, to_cuda, read_mol2_batch
-from src.dataset_v3 import collate, DataSet
+from src.dataset_v4 import collate, DataSet
 import src.Loss as Loss
 
-from args3 import args_supd as args
-
+#from args3 import args_BRDd as args
+from args_devel import args_based2re as args
 import warnings
 warnings.filterwarnings("ignore", message="sourceTensor.clone")
 
@@ -125,16 +125,22 @@ def load_data(infile,type='txt',workpath=None):
     target_s = []
     ligands_s = []
     is_ligand_s = []
+    decoy_npzs = []
     if type == 'txt':
         for ln in open(infile,'r'):
-            x = ln.strip().split()
-            is_ligand = bool(x[0]) #1: PL, 0: PP
-            target = x[1]
-            liglist = x[2:]
+            x = ln[:-1].split()
+            is_ligand = bool(x[0]) #0:PP; 1:PL
+            target    = x[1]
+            mol2type  = x[2] #how to read mol2f: single/batch
+            mol2f     = x[3] #.npz or .mol2
+            activemol = x[4] # active molecule name or selection logic
+            decoyf    = x[5] #.npz or batch-mol2 
+            if decoyf.endswith('.npz') and decoyf not in decoy_npzs:
+                decoy_npzs.append(decoyf)
         
-            target_s.append(target)
-            ligands_s.append(liglist)
             is_ligand_s.append(is_ligand)
+            target_s.append(target)
+            ligands_s.append((mol2type,mol2f,activemol,decoyf))
             
     elif type == 'mol2':
         tags = read_mol2_batch(infile,tag_only=True)[-1]
@@ -152,7 +158,7 @@ def load_data(infile,type='txt',workpath=None):
         
     if workpath != None:
         set_params['datapath'] = workpath # override
-    data_set = DataSet(target_s, is_ligand_s, ligands_s, **set_params)
+    data_set = DataSet(target_s, is_ligand_s, ligands_s, decoy_npzs=decoy_npzs, **set_params)
     data_loader = data.DataLoader(data_set, **params_loader)
     return data_loader
 

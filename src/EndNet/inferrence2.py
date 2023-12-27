@@ -15,10 +15,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.model_former import EndtoEndModel
 from src.myutils import count_parameters, to_cuda, read_mol2_batch
-from src.dataset_screen_work import collate, DataSet
+from src.dataset_v3 import collate, DataSet
 import src.Loss as Loss
 
-from args2 import args_formerNR_scratch as args
+from args_devel import args_based3a as args
 
 import warnings
 warnings.filterwarnings("ignore", message="sourceTensor.clone")
@@ -29,7 +29,7 @@ silent = False
 
 # default setup
 set_params={
-    #'datapath' : "/scratch/hpark/MotifScreen/test.grid1.5",
+    'datapath' : "/ml/motifnet/",
     'ball_radius'  : 8.0,
     'edgedist'     : (2.2,4.5), # grid: 18 neighs -- exclude cube-edges
     'edgemode'     : 'topk',
@@ -42,6 +42,8 @@ set_params={
     'maxnode'      : 2000,
     'max_subset'   : 20,
     'drop_H'       : True,
+    'input_features': args.input_features
+
 }
 
 params_loader={
@@ -125,14 +127,17 @@ def load_data(infile,type='txt',workpath=None):
     is_ligand_s = []
     if type == 'txt':
         for ln in open(infile,'r'):
-            x = ln.strip().split()
-            is_ligand = bool(x[0]) #1: PL, 0: PP
-            target = x[1]
-            liglist = x[2:]
+            x = ln[:-1].split()
+            is_ligand = bool(x[0]) #0:PP; 1:PL
+            target    = x[1]
+            mol2type  = x[2] #how to read mol2f: single/batch
+            mol2f     = x[3] #.npz or .mol2
+            activemol = x[4] # active molecule name or selection logic
+            decoyf    = x[5] #.npz or batch-mol2 
         
-            target_s.append(target)
-            ligands_s.append(liglist)
             is_ligand_s.append(is_ligand)
+            target_s.append(target)
+            ligands_s.append((mol2type,mol2f,activemol,decoyf))
             
     elif type == 'mol2':
         tags = read_mol2_batch(infile,tag_only=True)[-1]
@@ -143,13 +148,13 @@ def load_data(infile,type='txt',workpath=None):
         for i,tag in enumerate(tags):
             if i%nsub == nsub-1 or (i == len(tags)-1):
                 target_s.append(targetname)
-                ligands_s.append(['batch']+tags[i+1-nsub:i+1])
+                ligands_s.append(['infer']+tags[i+1-nsub:i+1])
 
         is_ligand_s = [True for _ in target_s]
         #is_ligand_s += [True for _ in tags]
         
     if workpath != None:
-        set_params['datapath'] = workpath
+        set_params['datapath'] = workpath # override
     data_set = DataSet(target_s, is_ligand_s, ligands_s, **set_params)
     data_loader = data.DataLoader(data_set, **params_loader)
     return data_loader
@@ -202,8 +207,14 @@ def inferrence(data_loader, report_attn=False):
     model,optimizer,start_epoch,train_loss,valid_loss=load_params(rank)
 
     ## iteration
+    #if ddp:
+    #    mp.spawn(train_one_epoch,args=(world_size,0),nprocs=world_size,join=True)
+    #    with torch.no_grad():
+    #        train_one_epoch(model,optimizer,data_loader,rank,0,report_attn)
+    #else:
+    
     with torch.no_grad():
-        temp_loss = train_one_epoch(model,optimizer,data_loader,rank,0,report_attn)
+        train_one_epoch(model,optimizer,data_loader,rank,0,report_attn)
         
 ### train_one_epoch
 def train_one_epoch(model,optimizer,loader,rank,epoch,report_attn):
@@ -295,8 +306,9 @@ def train_one_epoch(model,optimizer,loader,rank,epoch,report_attn):
                             nK = nK.squeeze() # hack, take the first one alone
                             lossTs, mae = Loss.structural_loss( Yrec_s, keyxyz, nK ) #both are Kx3 coordinates
                             lossTr = args.w_spread*Loss.spread_loss( keyxyz, z, grid, nK )
-
-                    
+                            
+                        if isinstance(aff,tuple):
+                            aff = aff[0]
                         # 2-2.s screening loss
                         lossScreen = args.w_screen*Loss.ScreeningLoss( aff, blabel )
                         Pbind = ['%4.2f'%float(a) for a in torch.sigmoid(aff)]
@@ -349,7 +361,12 @@ def train_one_epoch(model,optimizer,loader,rank,epoch,report_attn):
 if __name__=="__main__":
     workpath = sys.argv[1]
     report_attn = '-attn' in sys.argv
-    
-    os.chdir(workpath)
-    data_loader = load_data('target.ligand.mol2',type='mol2',workpath='./')
+
+    if workpath.endswith('.txt'):
+        data_loader = load_data(workpath,type='txt')
+        print(len(data_loader))
+    else:
+        os.chdir(workpath)
+        data_loader = load_data('target.ligand.mol2',type='mol2',workpath='./')
+        
     inferrence(data_loader, report_attn=report_attn)

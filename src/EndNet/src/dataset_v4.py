@@ -26,6 +26,7 @@ class DataSet(torch.utils.data.Dataset):
                  maxnode = 3000,
                  drop_H = False,
                  input_features='base',
+                 decoy_npzs=[],
                  debug=False):
         
         self.targets = targets
@@ -52,14 +53,16 @@ class DataSet(torch.utils.data.Dataset):
         self.max_subset = max_subset
         self.drop_H = drop_H
         self.crossactives = []
-        self.decoys = []
+        self.decoys = {}
         
         if os.path.exists('data/crossreceptor.npz'):
             self.crossactives = np.load('data/crossreceptor.npz',allow_pickle=True)['crossrec'].item()
-        
-        if os.path.exists('data/decoys.npz'):
-            self.decoys = np.load('data/decoys.npz',allow_pickle=True)['decoys'].item()
 
+        # pre-load
+        for f in decoy_npzs:
+            if os.path.exists(f):
+                print("pre-load decoy npz file: "+f)
+                self.decoys[f] = np.load(f,allow_pickle=True)['decoys'].item()
             
     def __len__(self):
         return len(self.targets)
@@ -79,11 +82,18 @@ class DataSet(torch.utils.data.Dataset):
         
         is_ligand = self.is_ligand[index]
 
-        ligands, eval_struct, mol2f, mol2type = self.parse_ligands(target, self.ligands[index], parentpath)
+        ligands, mol2f, mol2type, datatype = self.parse_ligands(target, self.ligands[index], parentpath)
+              
+        eval_struct = 0.0
+        if datatype == 'structure':
+            eval_struct = 1.0
+        elif datatype == 'model':
+            eval_struct = 0.5
+        
         t1 = time.time()
 
         keyatomf = parentpath+'/keyatom.def.npz' 
-        if os.path.exists(parentpath+'/%s.keyatom.def.npz'%pname):
+        if not os.path.exists(keyatomf) and os.path.exists(parentpath+'/%s.keyatom.def.npz'%pname):
             keyatomf = parentpath+'/%s.keyatom.def.npz'%pname
         
         info = {'pname': pname}
@@ -166,12 +176,19 @@ class DataSet(torch.utils.data.Dataset):
         info['eval_struct'] = eval_struct
         t9 = time.time()
         #print(target, t1-t0, t2-t1, t3-t2, t4-t3, t9-t0)
-        
+
         return Grec, Glig_list, cats, mask, keyxyz, keyidx_list, blabel_list, info #label
 
     def parse_ligands(self, target, ligands, parentpath):
         pname = target.split('/')[-1]
 
+        if 'dock' in target:
+            datatype = 'model'
+        elif '.ligand' in target or '.biolip' in target:
+            datatype = 'structure'
+        else:
+            datatype = 'binding'
+        
         t0 = time.time()
         if len(ligands) == 4 and isinstance(ligands,tuple): # generic logic
             mol2type, mol2f, activemol, decoyf = ligands
@@ -183,11 +200,15 @@ class DataSet(torch.utils.data.Dataset):
                     actives = self.crossactives[pname]
                     if pname in actives and (np.random.rand() > Pself): 
                         active = [np.random.choice(actives)]
+                        datatype = 'binding' #don't eval struct
                     else:
                         active = [target] # self
                 else:
                     active = [activemol]
-                mol2f = self.datapath #actual mol2s are datapath+/+ligand+'.mol2'
+                if mol2f.endswith('mol2'):
+                    mol2f = self.datapath + '/' + mol2f
+                else:
+                    mol2f = self.datapath #actual mol2s are datapath+/+ligand+'.mol2'
 
             elif mol2type == 'batch': #"batched-style"
                 mol2f = self.datapath+mol2f
@@ -197,7 +218,13 @@ class DataSet(torch.utils.data.Dataset):
             t1 = time.time()
             if decoyf.endswith('.npz'):
                 #decoys = np.load(decoyf,allow_pickle=True)['decoys'].item()[pname]
-                decoys = self.decoys[pname]
+                if pname in self.decoys[decoyf]:
+                    decoys = self.decoys[decoyf][pname]
+                elif activemol in self.decoys[decoyf]:
+                    decoys = self.decoys[decoyf][activemol]
+                else:
+                    decoys = []
+                    
             elif decoyf.endswith('.mol2'): #random selection among
                 decoyf = self.datapath+decoyf
                 decoys = myutils.read_mol2_batch(decoyf,tag_only=True)[-1]
@@ -234,15 +261,11 @@ class DataSet(torch.utils.data.Dataset):
         # active always comes first
         ligands = active + decoys
 
-        eval_struct = False
-        if active != [] and target == active[0]:
-            eval_struct = True
-
         # check inputs are there
         if not os.path.exists(mol2f):
-            print(f"no such file exists {molf2}")
+            print(f"no such file exists {mol2f}")
 
-        return ligands, eval_struct, mol2f, mol2type
+        return ligands, mol2f, mol2type, datatype
 
     def read_ligands(self, target, ligands, keyatomf, mol2path, actives=[], mol2type='single'):
         if mol2type == 'batch':
@@ -268,6 +291,7 @@ class DataSet(torch.utils.data.Dataset):
             keyxyz = torch.zeros((4,3))
             #origin = torch.mean(Glig_list[0].ndata['x'],axis=0) # 1,3
 
+        #print(target, len(ligands), len(Glig_list))
         return blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, origin
 
     def read_by_single_mol2(self, target, ligands, keyatomf, mol2path):
@@ -279,13 +303,26 @@ class DataSet(torch.utils.data.Dataset):
         origin = None
         Gnat = None
         keyxyz = None
-        
+
         for lig in ligands:
-            mol2 = mol2path+lig+'.ligand.mol2'
-            confmol2 = mol2path+lig+'.conformers.mol2'
+            confmol2 = None
+            if mol2path.endswith('.mol2'):
+                mol2 = mol2path
+                confmol2 = mol2path[:-5]+'.conformers.mol2'
+            ## TODO: clean data name
+            elif 'GridNet.' not in lig and '.' in lig:
+                mol2 = mol2path+'/GridNet.biolip/'+lig+'.ligand.mol2'
+            elif 'GridNet.' not in lig:
+                mol2 = mol2path+'/GridNet.ligand/'+lig+'.ligand.mol2'
+            else:
+                mol2 = mol2path+'/'+lig+'.ligand.mol2'
+
+            if confmol2 == None: confmol2 = mol2path+lig+'.conformers.mol2'
+            #print(lig,mol2,confmol2,self.pert, os.path.exists(confmol2))
+            
             if not self.pert or not os.path.exists(confmol2):
                 confmol2 = None
-                
+
             Gnat,Glig,atms = ligand_graph_from_mol2(mol2,
                                                     dcut=self.edgedist[1], #unused
                                                     read_alt_conf=confmol2,
@@ -304,7 +341,7 @@ class DataSet(torch.utils.data.Dataset):
             Glig.ndata['x'] = Glig.ndata['x'] - com # move lig to origin
                 
             keyidx = identify_keyidx(lig, atms, keyatomf)
-                
+
             if not keyidx: continue
             keyidx_list.append(keyidx)
             Glig_list.append(Glig)
@@ -325,22 +362,30 @@ class DataSet(torch.utils.data.Dataset):
 
         tags_processed = []
         for e,q,b,o,x,n,a,at,tag in zip(elems,qs,bonds,borders,xyz,nneighs,atms,atypes,tags):
+            extras = {}
             try:
             #if True:
                 keyidx = identify_keyidx(tag, a, keyatomf)
                 if not isinstance(keyidx, list):
                     print("key name violation %s"%(tag))
                     continue
-                
                 keyidx_list.append(keyidx)
                 tags_processed.append(tag)
 
+                if self.input_features == 'graphex':
+                    f_ecfp = mol2.replace(mol2.split('/')[-1],'')+'/ecfp4.npz'
+                    print(mol2, f_ecfp, os.path.exists(f_ecfp))
+                    if os.path.exists(f_ecfp):
+                        bits = np.load(f_ecfp,allow_pickle=True)['bits'].item()
+                        if tag in bits:
+                            extras['ecfp4'] = bits[tag]
+                    
                 args = e,q,b,o,x,n,a,at
                 Glig = generate_ligand_graph(args, mode=self.edgemode, top_k=self.edgek[0],
-                                             input_features=self.input_features)
+                                             input_features=self.input_features,
+                                             extras=extras)
             
                 com = torch.mean(Glig.ndata['x'],axis=0) # 1,3
-                #print("com, batch", com)
                 Glig.ndata['x'] = Glig.ndata['x'] - com # move lig to origin
                 
                 atms_list.append(a)
@@ -410,7 +455,7 @@ def receptor_graph_from_structure(npz, grids, origin, edgemode, edgedist, edgek,
 
     obt_fs = [aas1hot,atypes,sasa,charges,d2o]
 
-    if features in ['ex1','ex2']:
+    if features in ['ex1','ex2','graph','graphex']:
         qs   = np.concatenate([prop['charge_rec'], np.zeros(ngrids)])
         occl = np.concatenate([prop['occl'], np.zeros(ngrids)]) # 0 is neutral
         qs   = np.expand_dims(qs,axis=1)
@@ -497,6 +542,7 @@ def make_atm_graphs(xyz, grids, obt_fs, bnds, atmnames,
     # distance
     t4a = time.time()
     w = torch.sqrt(torch.sum((xyz[v] - xyz[u])**2, axis=-1)+1e-6)[...,None]
+
     w1hot = distance_feature('std',w,0.5,5.0) # torch.tensor
        
     bnds_bin = torch.tensor(bnds_bin[v,u]).float() #replace first bin (0.0~0.5 Ang) to bond info
@@ -643,9 +689,20 @@ def ligand_graph_from_mol2(mol2,dcut,
         ialt = min(np.random.randint(len(xyz_alt)),len(xyz_alt)-1)
         args = list(args)
         args[4] = xyz_alt[ialt]
+
+    extras = {}
+    if input_features == 'graphex':
+        f_ecfp = mol2.replace(mol2.split('/')[-1],'')+'/ecfp4.npz'
+        #print(mol2, f_ecfp, os.path.exists(f_ecfp))
+        if os.path.exists(f_ecfp):
+            bits = np.load(f_ecfp,allow_pickle=True)['bits'].item()
+            tag = mol2.split('/')[-1][:-5]
+            if tag in bits:
+                extras['ecfp4'] = bits[tag]
     
     Glig = generate_ligand_graph(args,
-                                 mode=mode, top_k=top_k, input_features=input_features)
+                                 mode=mode, top_k=top_k, input_features=input_features,
+                                 extras=extras)
     
     Gnat = copy.deepcopy(Glig)
     Gnat.ndata['x'] = torch.tensor(xyz_nat).float()[:,None,:]
@@ -725,7 +782,8 @@ def read_mol2(mol2, drop_H=False):
 
 def generate_ligand_graph(args,
                           top_k=16, dcut=5.0, mode='dist',
-                          input_features='base'):
+                          input_features='base',
+                          extras={}):
 
     elems, qs, bonds, borders, xyz, nneighs, atms, atypes = args
     X = torch.tensor(xyz[None,]) #expand dimension
@@ -744,27 +802,31 @@ def generate_ligand_graph(args,
     obt.append(nneighs)
         
     # "base" up to here
-    if input_features == 'ex1':
+    if input_features in ['ex1','ex2','graph','graphex']:
         sasa,nsasa,occl = myutils.sasa_from_xyz(xyz, elems)
         obt.append(nsasa[:,None])
         obt.append(occl[:,None])
         obt.append(qs[:,None])
-        
+
     elems = [myutils.ELEMS.index(a) for a in elems]
     elems1hot = np.eye(len(myutils.ELEMS))[elems] # 1hot encoded
     obt.append(elems1hot)
-    
-    # just dummy placeholder for trsf learning
-    #key1hot = np.zeros((len(elems),4))
-    #obt.append(key1hot)
 
+    if input_features == 'graphex':
+        # 77 -> 50
+        hashkeys = get_hashkey('data/hashkeys3s.npz',
+                                bonds,borders,elems,maxrank=50)
+        obt.append(hashkeys)
+    
     obt = np.concatenate(obt,axis=-1)
 
     ## 2. edge features
     # 1-hot encode bond order
     ib = np.zeros((xyz.shape[0],xyz.shape[0]),dtype=int)
-    for k,(i,j) in enumerate(bonds): ib[i,j] = ib[j,i] = k
-    
+    bgraph = np.zeros((xyz.shape[0],xyz.shape[0]),dtype=int)
+    for k,(i,j) in enumerate(bonds):
+        ib[i,j] = ib[j,i] = k
+        bgraph[i,j] = bgraph[j,i] = 1
     border_ = np.zeros(u.shape[0], dtype=np.int64)
     d_ = torch.zeros(u.shape[0])
     t1 = time.time()
@@ -773,9 +835,14 @@ def generate_ligand_graph(args,
         border_[k] = borders[ib[i,j]]
         d_[k] = d[i,j]
     t2 = time.time()
-
+    
     edata = torch.eye(5)[border_] #0~3
-    edata[:,-1] = normalize_distance(d_) #4
+    if input_features in ['base','ex1','ex2']:
+        edata[:,-1] = normalize_distance(d_) #4
+    elif input_features.startswith('graph'):
+        bsep = scipy.sparse.csgraph.shortest_path(bgraph,directed=False)
+        bsep = torch.tensor(bsep)
+        edata[:,-1] = 1.0/(bsep[u,v]+0.00001) #1/nsep
 
     ## 3. ligand global properties
     nflextors = 0
@@ -825,6 +892,10 @@ def generate_ligand_graph(args,
         natype = [atypes.count(a) for a in range(21,52)]
         gfeats += [list(np.tanh(natype))]
         
+    elif input_features == 'graphex' and 'ecfp4' in extras:
+        gfeats.append(list(extras['ecfp4']))
+        print("read ecfp4")
+        
     gdata = np.concatenate(gfeats)
     
     Glig.ndata['attr'] = torch.tensor(obt).float()
@@ -836,6 +907,43 @@ def generate_ligand_graph(args,
     Glig.ndata['Y'] = torch.zeros(obt.shape[0],3) # placeholder
 
     return Glig
+
+def get_hashkey(npz,bonds,borders,elems,maxrank=50):
+    keyhash = list(np.load(npz,allow_pickle=True)['keys'])
+    if len(keyhash) > maxrank: keyhash = keyhash[:maxrank]
+    
+    # angle connections
+    angs = []
+    for ib,(i,j) in enumerate(bonds[:-1]):
+        for (k,l) in bonds[ib:]:
+            if k==i and j != l: angs.append([j,k,l])
+            if k==j and i != l: angs.append([i,j,l])
+            elif l==i and j != k: angs.append([j,i,k])
+            elif l==j and i != k: angs.append([i,j,k])
+
+    for i,j,k in angs:
+        if [k,j,i] not in angs: angs.append([k,j,i])
+
+    BO = np.zeros((len(elems),len(elems)),dtype=int)
+    for b,o in zip(bonds,borders):
+        BO[b] = o
+
+    #ELEMS = {'Null':0,'H':1,'C':2,'N':3,'O':4,
+    #         'Cl':5,'F':5,'I':5,'Br':5,
+    #         'P':6,'S':7}
+    ELEMS = [0,1,2,3,4,5,5,5,5,6,7]
+    
+    #ELEMS = {'Null':0,'H':1,'C':2,'N':3,'O':4,
+    #         'Cl':5,'F':5,'I':5,'Br':5,
+    #         'P':6,'S':7}
+
+    key1hot = np.zeros((len(elems),len(keyhash)+1))
+    
+    for i,j,k in angs:
+        hashkey = 100*BO[i,j] + 10*ELEMS[elems[j]] + ELEMS[elems[k]]
+        if hashkey in keyhash:
+            key1hot[i,keyhash.index(hashkey)+1] += 1.0
+    return key1hot
 
 def identify_keyidx(target, atms, keyatomf):
     if '/' in target: target = target.split('/')[-1]
@@ -877,7 +985,7 @@ def distance_feature(mode,d,binsize=0.5,maxd=5.0):
 def collate(samples):
     #samples should be G,info
 
-    # check Gatm only  -- Glig, keyxyz 
+    # check Gatm only  -- Glig, keyxyz
     valid = [v for v in samples if v != None]
     valid = [v for v in valid if (v[0] != False and v[0] != None)]
     if len(valid) == 0:
@@ -935,6 +1043,7 @@ def collate(samples):
         Glig = dgl.batch(s[1])
         gdata = torch.stack([g.gdata for g in s[1]])
         setattr( Glig, "gdata", gdata ) #batched
+        #Glig = dgl.add_self_loop(Glig) #this hurts classification learning -- why?
 
         try: 
             keyxyz = s[4].squeeze()[None,:,:]
@@ -952,6 +1061,6 @@ def collate(samples):
     # below contains l0 features only
     #if Glig != None:
     #    print("!", Glig.batch_num_nodes())
-    
+
     return Grec, Glig, cats, masks, keyxyz, keyidx, blabel, info
     

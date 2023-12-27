@@ -1,7 +1,8 @@
+import sys
 import torch
 import torch.nn as nn
 
-from src.module import Grid_SE3, Ligand_SE3, TrigonModule, ClassModule
+from src.module import Grid_SE3, Ligand_SE3, Ligand_GAT, TrigonModule, ClassModule
 from src.other_utils import to_dense_batch, make_batch_vec
 
 def get_pair_dis_one_hot(d, bin_size=2, bin_min=-1, bin_max=30, num_classes=32):
@@ -96,8 +97,13 @@ class EndtoEndModel(nn.Module):
         super().__init__()
 
         self.dropout_rate = args.dropout_rate
-        self.se3_Grid = Grid_SE3( **args.params_grid )
-        self.se3_Ligand = Ligand_SE3( **args.params_ligand )
+        self.GridFeaturizer   = Grid_SE3( **args.params_grid )
+        if args.ligand_model == 'se3':
+            self.LigandFeaturizer = Ligand_SE3( **args.params_ligand )
+        elif args.ligand_model == 'gat':
+            self.LigandFeaturizer = Ligand_GAT( **args.params_ligand )
+        else:
+            sys.exit("unknown ligand_model: "+args.ligand_model)
 
         self.trigon_lig = TrigonModule( args.params_TR['n_trigon_lig_layers'],
                                         args.params_TR['m'],
@@ -121,7 +127,9 @@ class EndtoEndModel(nn.Module):
 
         self.d = args.params_TR['c']
         self.classification_mode = args.classification_mode
-        self.extract_ligand_embedding = LigandModule( args.dropout_rate, n_out=args.n_lig_emb )
+        self.extract_ligand_embedding = LigandModule( args.dropout_rate,
+                                                      n_input=args.n_lig_feat,
+                                                      n_out=args.n_lig_emb )
 
         #only for combo
         self.sig_Rl = torch.nn.Parameter(torch.tensor(10.0))
@@ -132,7 +140,7 @@ class EndtoEndModel(nn.Module):
         # 1) first process Grec to get h_rec -- "motif"-embedding
         node_features = {'0':Grec.ndata['attr'][:,:,None].float(), 'x': Grec.ndata['x'].float() }
         edge_features = {'0':Grec.edata['attr'][:,:,None].float()}
-        h_rec, cs = self.se3_Grid(Grec, node_features, edge_features, drop_out)
+        h_rec, cs = self.GridFeaturizer(Grec, node_features, edge_features, drop_out)
 
         gridmap = torch.eye(h_rec.shape[0]).to(Grec.device)[grididx]
 
@@ -149,7 +157,10 @@ class EndtoEndModel(nn.Module):
             return Ykey_s, z_norm, cs, aff
 
         # 2) ligand embedding
-        h_lig = self.se3_Ligand(Glig)
+        try:
+            h_lig = self.LigandFeaturizer(Glig)
+        except:
+            return None, None, None, None
 
         # global embedding if needed
         h_lig_global = self.extract_ligand_embedding( Glig.gdata.to(Glig.device) ) # gdata isn't std attr
@@ -168,6 +179,7 @@ class EndtoEndModel(nn.Module):
         key_batched = torch.zeros((Glig.batch_num_nodes().shape[0],Kmax,Nmax)).to(Grec.device) #b x K x j
         for i,idx in enumerate(keyidx):
             key_batched[i,:idx.shape[0],:idx.shape[1]] = idx
+
             
         # 3-3) ligand part
         batchvec_lig = make_batch_vec(Glig.batch_num_nodes()).to(Grec.device)
