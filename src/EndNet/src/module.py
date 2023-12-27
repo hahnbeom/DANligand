@@ -5,7 +5,7 @@ import torch.utils.checkpoint as checkpoint
 from SE3.se3_transformer.model import SE3Transformer
 from SE3.se3_transformer.model.fiber import Fiber
 from src.trigon_2 import *
-from src.GAT import GATLayer
+#from src.GAT import GATLayer
 from dgl.nn import EGATConv
 
 class Grid_SE3(nn.Module):

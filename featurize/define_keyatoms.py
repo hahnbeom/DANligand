@@ -51,6 +51,10 @@ def get_atom_lines(mol2_file):
             first_atom_idx = i+1
         if ln.startswith('@<TRIPOS>BOND'):
             last_atom_idx = i-1
+            break
+        if ln.startswith('@<TRIPOS>UNITY_ATOM_ATTR'):
+            last_atom_idx = i-1
+            break
 
     return lines[first_atom_idx:last_atom_idx+1]
 
@@ -128,9 +132,13 @@ def main(mol2s):
             selected_atm = select_atm_from_frag(mol2, fragatms)
             key_atm_list.append(selected_atm)
 
-        if len(BRICSfragments) < 4:
-            key_atm_list = select_random_atm(mol2, key_atm_list)
-
+        try:
+            if len(BRICSfragments) < 4:
+                key_atm_list = select_random_atm(mol2, key_atm_list)
+        except:
+            print("error", mol2)
+            continue
+                
         KEYATOMS[trg] = key_atm_list
 
     return KEYATOMS
@@ -141,8 +149,6 @@ def launch(mol2s,N=10,save_separately=True,collated_npz='keyatom.def.npz'):
     print("processing %s mol2s in %d processors"%(len(mol2s), N))
     for i,m in enumerate(mol2s):
         mol2s_split[i%N].append(m)
-
-    main(mol2s_split[0])
     
     ans = a.map(main, mol2s_split)
     keyatms = {}
@@ -160,10 +166,10 @@ def launch(mol2s,N=10,save_separately=True,collated_npz='keyatom.def.npz'):
             
 if __name__ == "__main__":
     mol2s = [l[:-1] for l in open(sys.argv[1])]
-    N = 5
+    N = 20
     if len(sys.argv) > 3:
         N = int(sys.argv[3])
-    launch(mol2s,N,save_separately=True)
+    #launch(mol2s,N,save_separately=True)
     
     # for saving multiple ligand into a single keynpz
-    #launch(mol2s,N,save_separately=False,collated_npz='keyatom.def.npz')
+    launch(mol2s,N,save_separately=False,collated_npz='keyatom.def.npz')

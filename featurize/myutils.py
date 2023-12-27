@@ -239,7 +239,7 @@ def get_native_info(xyz_r,xyz_l,bnds_l=[],atms_l=[],contact_dist=5.0,shift_nl=Tr
 
     return contacts, dco
 
-def fa2gentype(fats):
+def fa2gentype(fats,aa):
     gts = {'Nbb':'Nad','Npro':'Nad3','NH2O':'Nad','Ntrp':'Nin','Nhis':'Nim','NtrR':'Ngu2','Narg':'Ngu1','Nlys':'Nam',
            'CAbb':'CS1','CObb':'CDp','CH1':'CS1','CH2':'CS2','CH3':'CS3','COO':'CDp','CH0':'CR','aroC':'CR','CNH2':'CDp',
            'OCbb':'Oad','OOC':'Oat','OH':'Ohx','ONH2':'Oad',
@@ -250,6 +250,8 @@ def fa2gentype(fats):
 
     gents = []
     for at in fats:
+        if aa == 'HIS' and at in ['Ntrp','Nhis']:
+            gents.append('Nam2') # allow both donor/acceptor
         if at in gentype2num:
             gents.append(at)
         else:
@@ -257,7 +259,7 @@ def fa2gentype(fats):
     return gents
 
 def defaultparams(aa,
-                  datapath='/applic/rosetta/current/database/chemical/residue_type_sets/fa_standard/residue_types',
+                  datapath='/applic/Rosetta/database/chemical/residue_type_sets/fa_standard/residue_types',
                   extrapath=''):
     # first search through Rosetta database
     p = None
@@ -294,7 +296,7 @@ def get_AAtype_properties(ignore_hisH=True,
         iaa += 1
         p = defaultparams(aa)
         atms,q,atypes,bnds,repsatm = read_params(p)
-        atypes_aa[iaa] = fa2gentype([atypes[atm] for atm in atms])
+        atypes_aa[iaa] = fa2gentype([atypes[atm] for atm in atms],aa)
         qs_aa[iaa] = q
         atms_aa[iaa] = atms
         bnds_aa[iaa] = bnds
