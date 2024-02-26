@@ -61,11 +61,12 @@ class LigandModule( nn.Module ):
         return h_lig
             
 class XformModule( nn.Module ):
-    def __init__(self, c ):
+    def __init__(self, c, normalize=False ):
         super().__init__()
         self.linear1 = nn.Linear(c, c)
         self.layernorm = nn.LayerNorm(c)
         self.linear2 = nn.Linear(c, c)
+        self.normalize = normalize
 
     def forward( self, V, Q, z, z_mask, dim ):
         # attention provided, not Q*K
@@ -75,7 +76,6 @@ class XformModule( nn.Module ):
         # K-summed attention on i-th N (norm-over K)
         z_denom = exp_z.sum(axis=dim).unsqueeze(dim) # B x N x 1 x c 
         z = torch.div(exp_z,z_denom) # B x N x K x c #repeated over K
-        #print(dim, z[0,0,:,:], z[1,0,:,:])
 
         Qa = self.linear1(Q) # B x K x c
         if dim == 1:
@@ -87,8 +87,10 @@ class XformModule( nn.Module ):
         
         #Va = self.layernorm( V + Va )
         V = V + self.linear2(Va)
-        #V = V + Va
 
+        if self.normalize:
+            V = nn.functional.layer_norm(V, V.shape)
+        
         return V
     
 class EndtoEndModel(nn.Module):
@@ -107,13 +109,15 @@ class EndtoEndModel(nn.Module):
 
         self.trigon_lig = TrigonModule( args.params_TR['n_trigon_lig_layers'],
                                         args.params_TR['m'],
-                                        args.params_TR['c'] )
+                                        args.params_TR['c'],
+                                        args.params_TR['dropout_rate'])
 
         self.n_trigon_key_layers = args.params_TR['n_trigon_key_layers']
 
         self.trigon_key = TrigonModule( 1,
                                         args.params_TR['m'],
-                                        args.params_TR['c'])
+                                        args.params_TR['c'],
+                                        args.params_TR['dropout_rate'])
 
         self.class_module = ClassModule( args.params_TR['m'],
                                          args.params_TR['c'],
@@ -122,11 +126,13 @@ class EndtoEndModel(nn.Module):
         
         self.struct_module = StructModule( args.params_TR['c'] )
 
-        self.XformKey = XformModule( args.params_TR['c'] )
-        self.XformGrid = XformModule( args.params_TR['c'] )
-
-        self.d = args.params_TR['c']
         self.classification_mode = args.classification_mode
+        self.d = args.params_TR['c']
+        normalize = (self.classification_mode == "former_contrast2")
+        
+        self.XformKey = XformModule( args.params_TR['c'], normalize=normalize )
+        self.XformGrid = XformModule( args.params_TR['c'], normalize=normalize )
+
         self.extract_ligand_embedding = LigandModule( args.dropout_rate,
                                                       n_input=args.n_lig_feat,
                                                       n_out=args.n_lig_emb )
@@ -158,7 +164,7 @@ class EndtoEndModel(nn.Module):
 
         # 2) ligand embedding
         try:
-            h_lig = self.LigandFeaturizer(Glig)
+            h_lig = self.LigandFeaturizer(Glig, drop_out=drop_out)
         except:
             return None, None, None, None
 
@@ -220,7 +226,7 @@ class EndtoEndModel(nn.Module):
             # update key/grid features using learned attention
             h_key_batched  = self.XformKey( h_key_batched, h_grid_batched, z, z_mask, dim=2 ) # key/query/attn
             h_grid_batched = self.XformGrid( h_grid_batched, h_key_batched, z, z_mask, dim=1 ) # key/query/attn
-            
+
             z = self.trigon_key( h_grid_batched, h_key_batched, z_mask,
                                  D_grid, D_key,
                                  drop_out=drop_out )

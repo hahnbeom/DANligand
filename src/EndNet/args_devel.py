@@ -82,12 +82,13 @@ class TRArgs:
 class Argument:
     def __init__(self, dropout_rate=0.1, m=32 ):
         self.dropout_rate = dropout_rate
+        
         self.params_grid = GridArgs(dropout_rate=dropout_rate).params
         self.params_grid['l0_out_features'] = m
         
         self.params_ligand = LigandArgs(dropout_rate=dropout_rate).params
         self.params_ligand['l0_out_features'] = m
-        
+
         self.params_TR   = TRArgs(dropout_rate=dropout_rate).params
         self.params_TR['m'] = m
         self.params_TR['l0_out_features_lig'] = m
@@ -102,15 +103,21 @@ class Argument:
         self.w_spread = 5.0
         self.w_screen = 0.0
         self.w_screen_contrast = 0.0
+        self.w_screen_ranking = 0.0
         self.trim_receptor_embedding = True # prv False
-        self.max_epoch = 200
+        self.max_epoch = 300
         self.debug = False
         self.datasetf = 'data/PLmix.60k.screen.txt'
         self.n_lig_feat = 19
         self.n_lig_emb = 4 # concatenated w/  other m embeddings
+        self.struct_loss = 'mse'
         self.input_features = 'base'
         self.pert = False
         self.ligand_model = 'se3'
+        self.load_cross = False
+        self.cross_eval_struct = False
+        self.nonnative_struct_weight = 0.2
+        self.randomize_grid = 0.0
 
     def feattype(self, feat):
         self.input_features = feat
@@ -137,6 +144,10 @@ class Argument:
             self.params_ligand['num_edge_features'] = 4 # drop distance
             self.params_grid['l0_in_features'] = 104 #+q, occl
 
+    def set_dropout_rate(self, value):
+        self.params_grid['dropout_rate'] = value
+        self.params_ligand['dropout_rate'] = value
+        self.params_TR['dropout_rate'] = value
             
 #========================
 args_base = Argument( 0.2, m=64 ) #m: pre-attention channel
@@ -150,7 +161,7 @@ args_base.params_TR['c'] = 64
 args_base.pert = False
 args_base.modelname = 'base'
 args_base.classification_mode = "former_contrast"
-args_base.wTR = 0.1 
+args_base.wTR = 0.1 # weights all structural losses (Ts, Tr)
 args_base.w_screen = 10.0 # removed 0.2 front so effectively 50.0 in previous unit
 args_base.w_screen_contrast = 1.0 # removed 0.2 front so effectively 50.0 in previous unit
 args_base.feattype('ex1')
@@ -237,5 +248,64 @@ args_debug.datasetf = ['data/debug.txt','data/debug.txt']
 
 args_GAT2 = copy.deepcopy(args_GAT)
 args_GAT2.modelname = 'baseGAT2'
-args_GAT2.datasetf = ['data/v3.BL2.train.txt','data/v3.BL2.valid.txt']
-args_GAT2.w_screen = 5.0
+args_GAT2.datasetf = ['data/v3.BL2Dd.train.txt','data/v3.BL2.valid.txt']
+#args_GAT2.datasetf = ['data/debug.txt','data/debug.txt']
+args_GAT2.w_screen = 1.0
+args_GAT2.w_screen_contrast = 1.0
+args_GAT2.w_screen_ranking = 15.0
+
+args_GAT3 = copy.deepcopy(args_GAT2)
+args_GAT3.modelname = 'baseGAT3'
+args_GAT3.datasetf = ['data/v3.BL2.train.txt','data/v3.BL2.valid.txt']
+
+args_GAT3BL3 = copy.deepcopy(args_GAT2)
+args_GAT3BL3.modelname = 'baseGAT3BL3'
+args_GAT3BL3.datasetf = ['data/v3.BL3.train.txt','data/v3.BL3.valid.txt']
+
+args_GAT3X = copy.deepcopy(args_GAT2)
+args_GAT3X.modelname = 'baseGAT3X'
+args_GAT3X.datasetf = ['data/v3.ext.train.txt','data/v3.BL2.valid.txt']
+args_GAT3X.load_cross = True
+args_GAT3X.w_screen_contrast = 5.0 #not originally, but up weight from epoch 114
+
+args_GAT3X2 = copy.deepcopy(args_GAT2)
+args_GAT3X2.modelname = 'baseGAT3X2'
+args_GAT3X2.datasetf = ['data/v3.ext.train.txt','data/v3.BL2.valid.txt']
+args_GAT3X2.load_cross = True
+args_GAT3X2.w_screen_contrast = 5.0
+
+args_GATm = copy.deepcopy(args_GAT2)
+args_GATm.modelname = 'baseGATm'
+args_GATm.datasetf = ['data/v3.ext.train.txt','data/v3.BL2.valid.txt']
+args_GATm.load_cross = True
+args_GATm.w_screen_contrast = 5.0
+args_GATm.struct_loss = 'Huber'
+
+args_allS = copy.deepcopy(args_GAT2)
+args_allS.modelname = 'allS'
+args_allS.datasetf = ['data/v3.ext.train.txt','data/v3.BL2.valid.txt']
+#args_allS.datasetf = ['data/v3.nochembl.train.txt','data/v3.BL2.valid.txt']
+args_allS.load_cross = True
+args_allS.cross_eval_struct = True
+args_allS.nonnative_struct_weight = 0.1
+#args_allS.cross_eval_struct = False
+#args_allS.nonnative_struct_weight = 0.0
+
+args_GATdrop03 = copy.deepcopy(args_GAT2)
+args_GATdrop03.modelname = 'baseGATdrop03'
+args_GATdrop03.set_dropout_rate(0.3)
+args_GATdrop03.datasetf = ['data/v3.ext.train.txt','data/v3.BL2.valid.txt']
+#args_GATdrop03.randomize_grid = 0.3 #through devel
+args_GATdrop03.load_cross = True
+
+args_GATd03ctrst = copy.deepcopy(args_GATdrop03)
+args_GATd03ctrst.modelname = 'baseGATd03ctrst'
+args_GATd03ctrst.classification_mode = "former_contrast"
+args_GATd03ctrst.w_screen_contrast = 5.0 # 1.0 originally but was not working...
+
+args_allS02 = copy.deepcopy(args_allS)
+args_allS02.nonnative_struct_weight = 0.1
+
+args_allSd3 = copy.deepcopy(args_allS)
+args_allSd3.modelname = 'allSd3'
+args_allSd3.datasetf = ['data/v3.extd3.train.txt','data/v3.BL2.valid.txt']

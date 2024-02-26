@@ -19,7 +19,9 @@ class DataSet(torch.utils.data.Dataset):
                  datapath='data',
                  ball_radius=8.0,
                  edgemode='dist', edgek=(8,16), edgedist=(2.2,4.5),
-                 pert=False, randomize=0.5,
+                 pert=False,
+                 randomize=0.5,
+                 randomize_grid=0.0,
                  ntype = 6,
                  max_subset = 5,
                  maxedge = 100000,
@@ -27,6 +29,9 @@ class DataSet(torch.utils.data.Dataset):
                  drop_H = False,
                  input_features='base',
                  decoy_npzs=[],
+                 load_cross=False,
+                 cross_eval_struct=False,
+                 nonnative_struct_weight=0.2,
                  debug=False):
         
         self.targets = targets
@@ -46,13 +51,17 @@ class DataSet(torch.utils.data.Dataset):
         self.edgek = edgek
         self.ntype = ntype
         self.pert = pert
+        self.load_cross = load_cross
         self.input_features = input_features
         self.randomize = randomize
+        self.randomize_grid = randomize_grid
         self.maxedge = maxedge
         self.maxnode = maxnode
         self.max_subset = max_subset
         self.drop_H = drop_H
         self.crossactives = []
+        self.cross_eval_struct = cross_eval_struct
+        self.nonnative_struct_weight = nonnative_struct_weight
         self.decoys = {}
         
         if os.path.exists('data/crossreceptor.npz'):
@@ -83,19 +92,17 @@ class DataSet(torch.utils.data.Dataset):
         is_ligand = self.is_ligand[index]
 
         ligands, mol2f, mol2type, datatype = self.parse_ligands(target, self.ligands[index], parentpath)
-              
         eval_struct = 0.0
         if datatype == 'structure':
             eval_struct = 1.0
         elif datatype == 'model':
-            eval_struct = 0.5
+            eval_struct = self.nonnative_struct_weight
         
         t1 = time.time()
 
         keyatomf = parentpath+'/keyatom.def.npz' 
         if not os.path.exists(keyatomf) and os.path.exists(parentpath+'/%s.keyatom.def.npz'%pname):
             keyatomf = parentpath+'/%s.keyatom.def.npz'%pname
-        
         info = {'pname': pname}
         Grec, Glig_list, cats, mask, keyxyz, keyidx_list, blabel_list = None, None, None, None, None, None, None
         NullArgs = (None, None, None, None, None, None, info)
@@ -108,6 +115,10 @@ class DataSet(torch.utils.data.Dataset):
         # 1. condition on inferrence <-> train; ligand-info <-> protein only
         sample = np.load(gridinfo, allow_pickle=True)
         grids  = sample['xyz'] #vector; set all possible motif positions for prediction
+
+        if self.randomize_grid > 1e-3:
+            randxyz = 2.0*self.randomize_grid*(0.5 - np.random.rand(len(grids),3))
+            grids = grids + randxyz
         
         #if self.labeled:
         cats, mask = None, None
@@ -120,8 +131,8 @@ class DataSet(torch.utils.data.Dataset):
             mask = torch.tensor(mask).float()
 
         origin = None
-        try:
-        #if True:
+        #try:
+        if True:
             t2 = time.time()
             if is_ligand:
                 gridchain = None
@@ -163,8 +174,8 @@ class DataSet(torch.utils.data.Dataset):
                 print(f"Receptor num edges {Grec.number_of_edges()} exceeds max cut {self.maxedge}")
                 return NullArgs
 
-        #else:
-        except:
+        else:
+        #except:
             print("failed to read %s"%target)
             return NullArgs
         
@@ -197,14 +208,19 @@ class DataSet(torch.utils.data.Dataset):
                 if mol2f.endswith('.npz'): # random selection
                     Pself = float(activemol)
                     #actives = np.load(mol2f,allow_pickle=True)['crossrec'].item()
-                    actives = self.crossactives[pname]
-                    if pname in actives and (np.random.rand() > Pself): 
+                    actives = [a.split('/')[-1].split('.')[0] for a in self.crossactives[pname]]
+
+                    if self.load_cross and pname in actives and (np.random.rand() > Pself): 
                         active = [np.random.choice(actives)]
-                        datatype = 'binding' #don't eval struct
+                        if self.cross_eval_struct:
+                            datatype = 'model' #weight by nonnative_struct_weight
+                        else:
+                            datatype = 'binding' #don't eval struct
                     else:
                         active = [target] # self
                 else:
                     active = [activemol]
+
                 if mol2f.endswith('mol2'):
                     mol2f = self.datapath + '/' + mol2f
                 else:
@@ -213,8 +229,13 @@ class DataSet(torch.utils.data.Dataset):
             elif mol2type == 'batch': #"batched-style"
                 mol2f = self.datapath+mol2f
                 active = [activemol]
+                if activemol == 'random':
+                    tags = myutils.read_mol2_batch(mol2f,tag_only=True)[-1]
+                    active = [np.random.choice(tags)]
+                    #print(target, active)
             else:
                 sys.exit("no such mol2type known: %s"%mol2type)
+                
             t1 = time.time()
             if decoyf.endswith('.npz'):
                 #decoys = np.load(decoyf,allow_pickle=True)['decoys'].item()[pname]
@@ -234,14 +255,18 @@ class DataSet(torch.utils.data.Dataset):
             # randomly select from mol2
             mol2type = 'batch'
             mol2f_a = parentpath+'/%s.active.mol2'%pname
-            active = myutils.read_mol2_batch(mol2f_a,tags_read=ligands[1:],tag_only=True)[-1]
-            active = [np.random.choice(active)] #one
+            mol2f = parentpath+'/%s.decoy.mol2'%pname #decoy only (or unknown)
             
-            mol2f_d = parentpath+'/%s.decoy.mol2'%pname #decoy only
-            mol2f = parentpath+'/%s.ligand.mol2'%pname #active+decoy concat
+            if os.path.exists(mol2f_a):
+                active = myutils.read_mol2_batch(mol2f_a,tags_read=ligands[1:],tag_only=True)[-1]
+                active = [np.random.choice(active)] #one
+            else:
+                active = []
             
-            if os.path.exists(mol2f_d):
-                decoys = myutils.read_mol2_batch(mol2f_d,tag_only=True)[-1] # override ligand
+            if os.path.exists(mol2f):
+                decoys = myutils.read_mol2_batch(mol2f,tags_read=ligands[1:],tag_only=True)[-1] # override ligand
+            else:
+                sys.exit(f"{mol2f} should exist!")
                 
         elif ligands[0] == 'infer': # old style support
             mol2type = 'batch'
@@ -252,10 +277,10 @@ class DataSet(torch.utils.data.Dataset):
         else: # old style
             mol2type = 'single'
             mol2f = self.datapath #actual mol2s are datapath+/+ligand+'.mol2'
-            active = [target]
-            decoys = ligands 
+            active = []
+            decoys = ligands
 
-        if len(decoys) > self.max_subset-1:
+        if len(decoys) > 1 and len(decoys) > self.max_subset-1:
             decoys = list(np.random.choice(decoys,self.max_subset-1,replace=False))
 
         # active always comes first
@@ -279,7 +304,7 @@ class DataSet(torch.utils.data.Dataset):
         blabel_list = [(1 if tag in actives else 0) for tag in tags_read]
         Gnat, keyxyz = None, None
         origin = None
-        
+
         if len(actives) > 0:
             inat = ligands.index(actives[0])
             Gnat = Gnat_list[inat]

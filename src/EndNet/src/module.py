@@ -147,18 +147,23 @@ class Ligand_GAT(torch.nn.Module):
 
         self.initial_linear = nn.Linear(l0_in_features, num_channels)
         self.initial_linear_edge = nn.Linear(num_edge_features, num_channels)
+
         self.dropout = nn.Dropout(p=dropout_rate)
         self.gat_net = nn.ModuleList( gat_layers )
         self.final_linear = nn.Linear(num_channels, l0_out_features)
         self.norm = nn.InstanceNorm1d(num_channels)
 
-    def forward(self, Glig ):
+    def forward(self, Glig, drop_out=True):
         isolated = ((Glig.in_degrees()==0) & (Glig.out_degrees()==0)).nonzero().squeeze()
-        #print(len(isolated))
         Glig.remove_nodes(isolated)
-        
-        in_node_features = self.dropout(Glig.ndata['attr'])
-        in_edge_features = self.dropout(Glig.edata['attr'])
+
+        if drop_out:
+            in_node_features = self.dropout(Glig.ndata['attr'])
+            in_edge_features = self.dropout(Glig.edata['attr'])
+        else:
+            in_node_features = Glig.ndata['attr']
+            in_edge_features = Glig.edata['attr']
+            
         edge_index = Glig.edges()
 
         # project first
@@ -176,8 +181,6 @@ class Ligand_GAT(torch.nn.Module):
             # mean pooling
             emb = emb.mean(1)
             edge_emb = edge_emb.mean(1)
-            
-            #print(i, emb.mean(), emb.std(), edge_emb.mean(), edge_emb.std() )
             
             emb = self.norm(emb)
             edge_emb = self.norm(edge_emb)
@@ -200,7 +203,6 @@ class TrigonModule(nn.Module):
         self.dropout = nn.Dropout2d(p=dropout_rate)
         
         self.n_trigonometry_module_stack = n_trigonometry_module_stack
-        
 
         self.Wrs = nn.Linear(m,c)
         self.Wls = nn.Linear(m,c)
@@ -227,6 +229,7 @@ class TrigonModule(nn.Module):
         z = torch.einsum('bnd,bmd->bnmd', hs_rec, hs_lig )
 
         # trigonometry part
+        
         for i_module in range(self.n_trigonometry_module_stack):
             if use_checkpoint:
                 zadd = checkpoint.checkpoint(self.protein_to_compound_list[i_module], z, D_rec, D_lig, z_mask.unsqueeze(-1))
@@ -285,7 +288,7 @@ class ClassModule( nn.Module ):
             self.map_to_L = nn.Linear( 2*c+n_lig_emb , 8 )
             self.final_linear = nn.Linear( 8, 1 )
 
-        elif self.classification_mode == 'former_contrast':
+        elif self.classification_mode.startswith('former_contrast'):
             self.linear_lig = nn.Linear(n_lig_emb, 1)
             self.Affmap = nn.Parameter( torch.rand(m) )
             self.Pcoeff = nn.Parameter( torch.Tensor([5.0]) )
@@ -334,7 +337,7 @@ class ClassModule( nn.Module ):
             pair_rep = self.map_to_L(pair_rep) # b x L
             Aff = self.final_linear(pair_rep).squeeze(-1) # b x 1
             
-        elif self.classification_mode == 'former_contrast':
+        elif self.classification_mode.startswith('former_contrast'):
             exp_z = torch.exp(z) 
             zg_denom = exp_z.sum(axis=(-2)).unsqueeze(-2) # b x N x 1 x d
             zg = torch.div(exp_z,zg_denom) # b x N x K x d; "per-NK weight, receptor version"
@@ -342,11 +345,15 @@ class ClassModule( nn.Module ):
             zk = torch.div(exp_z,zk_denom) # b x N x K x d; "per-NK weight, ligand version"
             #zl = torch.sum( ) # b x N 
             
+
+            if self.classification_mode == 'former_contrast2':
+                Affmap = self.Affmap / torch.sum(self.Affmap) # normalize so that sum be channel-dimx
+            else:
+                Affmap = self.Affmap / torch.mean(self.Affmap) # normalize so that sum be channel-dimx
             # normalized embedding
             hs_grid_batched = torch.softmax(hs_grid_batched, axis=-1)
             hs_key_batched  = torch.softmax(hs_key_batched, axis=-1)
-            
-            Affmap = self.Affmap / torch.mean(self.Affmap) # normalize so that sum be channel-dimx
+                
             # derive dot product to binders to be at 1.0, non-binders at 0.0
             Aff_contrast = torch.einsum( 'bkd,d->bk', hs_key_batched, Affmap ) # B x k
 

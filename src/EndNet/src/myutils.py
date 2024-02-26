@@ -1,15 +1,35 @@
 import numpy as np
 #import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, roc_auc_score
-import sys
-sys.path.insert(0,'/home/hpark/util3')
-from statistic import dat2distribution
 
 ELEMS = ['Null','H','C','N','O','Cl','F','I','Br','P','S'] #0 index goes to "empty node"
 
+def dat2distribution(datlist,minval,maxval,binsize,normalize=True):
+    n_bin = int((maxval-minval)/binsize)
+    distr= np.zeros(n_bin,dtype=int)
+    
+    for i_dat in datlist:
+        try:
+            scale_dat=int((i_dat-minval)/binsize)
+        except:
+            continue
+        if scale_dat >= n_bin:
+            distr[-1]+=1
+        elif scale_dat < 0:
+            distr[0]+=1
+        else:
+            distr[scale_dat]+=1
+
+    if normalize:
+        distr = distr/np.sum(distr)
+    return distr
+
 def calc_AUC(Pt, Pf):
-    Tdstr = dat2distribution(Pt[t], 0.0, 1.0, 0.02)
-    Fdstr = dat2distribution(Pf[t], 0.0, 1.0, 0.02)
+    if len(Pt) == 0 or len(Pf) == 0:
+        return -1.0
+    
+    Tdstr = dat2distribution(Pt, 0.0, 1.0, 0.02)
+    Fdstr = dat2distribution(Pf, 0.0, 1.0, 0.02)
     #for i,y in enumerate(Tdstr):
     #    x = 0.02*(0.5+i)
     #    print("%3d %4.2f %8.5f %8.4f"%(t,x,y,Fdstr[i]))
@@ -17,10 +37,11 @@ def calc_AUC(Pt, Pf):
     Q = np.array(Fdstr)+0.00001
     #KLdiv = np.sum(P*np.log(P/Q+0.00001))
 
-    label = [1.0 for _ in Pt[t]] + [0.0 for _ in Pf[t]]
-    score = Pt[t] + Pf[t]
+    label = [1.0 for _ in Pt] + [0.0 for _ in Pf]
+    score = Pt + Pf
     auc = roc_auc_score(label, score)
     #fpr, tpr, thrs = roc_curve(label, score)
+
     return auc
     
 def count_parameters(model):
