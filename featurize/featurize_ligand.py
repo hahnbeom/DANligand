@@ -2,13 +2,14 @@ import glob
 import numpy as np
 import copy
 import os,sys
+import time
 from scipy.spatial import distance_matrix
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 import scipy
 import myutils
 
-def sasa_from_xyz(xyz,reschains,atmres_rec):
+def sasa_from_xyz_old(xyz,reschains,atmres_rec):
     #dmtrx
     D = distance_matrix(xyz,xyz)
     cbcounts = np.sum(D<12.0,axis=0)-1.0
@@ -22,6 +23,60 @@ def sasa_from_xyz(xyz,reschains,atmres_rec):
     sasa = [sasa_byres[reschains.index(res)] for res,atm in atmres_rec]
     
     return sasa
+
+def sasa_from_xyz(xyz, elems, probe_radius=1.4, n_samples=50):
+    atomic_radii = {"C":  2.0,"N": 1.5,"O": 1.4,"S": 1.85,"H": 0.0, #ignore hydrogen for consistency
+                    "F": 1.47,"Cl":1.75,"Br":1.85,"I": 2.0,'P': 1.8}
+    
+    areas = []
+    normareas = []
+    centers = xyz
+    radii = np.array([atomic_radii[e] for e in elems])
+    n_atoms = len(elems)
+
+    inc = np.pi * (3 - np.sqrt(5)) # increment
+    off = 2.0/n_samples
+
+    pts0 = []
+    for k in range(n_samples):
+        phi = k * inc
+        y = k * off - 1 + (off / 2)
+        r = np.sqrt(1 - y*y)
+        pts0.append([np.cos(phi) * r, y, np.sin(phi) * r])
+    pts0 = np.array(pts0)
+
+    kd = scipy.spatial.cKDTree(xyz)
+    neighs = kd.query_ball_tree(kd, 8.0)
+
+    occls = []
+    for i,(neigh, center, radius) in enumerate(zip(neighs, centers, radii)):
+        neigh.remove(i)
+        n_neigh = len(neigh)
+        d2cen = np.sum((center[None,:].repeat(n_neigh,axis=0) - xyz[neigh]) ** 2, axis=1)
+        occls.append(d2cen)
+        
+        pts = pts0*(radius+probe_radius) + center
+        n_neigh = len(neigh)
+        
+        x_neigh = xyz[neigh][None,:,:].repeat(n_samples,axis=0)
+        pts = pts.repeat(n_neigh, 0).reshape(n_samples, n_neigh, 3)
+        
+        d2 = np.sum((pts - x_neigh) ** 2, axis=2) # Here. time-consuming line
+        r2 = (radii[neigh] + probe_radius) ** 2
+        r2 = np.stack([r2] * n_samples)
+
+        # If probe overlaps with just one atom around it, it becomes an insider
+        n_outsiders = np.sum(np.all(d2 >= (r2 * 0.99), axis=1))  # the 0.99 factor to account for numerical errors in the calculation of d2
+        # The surface area of   the sphere that is not occluded
+        area = 4 * np.pi * ((radius + probe_radius) ** 2) * n_outsiders / n_samples
+        areas.append(area)
+
+        norm = 4 * np.pi * (radius + probe_radius)
+        normareas.append(min(1.0,area/norm))
+
+    occls = np.array([np.sum(np.exp(-occl/6.0),axis=-1) for occl in occls])
+    occls = (occls-6.0)/3.0 #rerange 3.0~9.0 -> -1.0~1.0
+    return areas, np.array(normareas), occls
 
 def featurize_target_properties(pdb,npz,out,extrapath="",verbose=False):
     # get receptor info
@@ -54,16 +109,23 @@ def featurize_target_properties(pdb,npz,out,extrapath="",verbose=False):
             if verbose: out.write("unknown residue: %s, skip\n"%resname)
             skipres.append(i)
             continue
-            
+
         natm = len(xyz_rec)
         atms_r = []
+                
+        # unify metal index to Calcium for simplification
+        if iaa >= myutils.ALL_AAS.index("CA"):
+            #print(iaa, myutils.ALL_AAS[iaa])
+            iaa = myutils.ALL_AAS.index("CA")
+            atypes = atypes_aa[iaa]
+            
         for iatm,atm in enumerate(atms):
             is_repsatm = (iatm == repsatm)
             
             if atm not in xyz[reschain]:
                 if is_repsatm: return False
                 continue
-
+                
             atms_r.append(atm)
             q_rec.append(qs[atm])
             atypes_rec.append(atypes[iatm])
@@ -100,8 +162,12 @@ def featurize_target_properties(pdb,npz,out,extrapath="",verbose=False):
     if len(atmnames) != len(xyz_rec):
         sys.exit('inconsistent anames <=> xyz')
 
-    # sasa apprx from coord
-    sasa = sasa_from_xyz(xyz_rec[repsatm_idx],reschains_read,atmres_rec)
+    # sasa apprx from coord -- old
+    #sasa = sasa_from_xyz(xyz_rec[repsatm_idx],reschains_read,atmres_rec)
+    elems_rec = [at[0] for at in atypes_rec]
+    t0 = time.time()
+    sasa, normsasa, occl = sasa_from_xyz(xyz_rec, elems_rec )
+    t1 = time.time()
     
     np.savez(npz,
              # per-atm
@@ -110,7 +176,8 @@ def featurize_target_properties(pdb,npz,out,extrapath="",verbose=False):
              atypes_rec=atypes_rec, #string
              charge_rec=q_rec,
              bnds_rec=bnds_rec,
-             sasa_rec=sasa, #apo
+             sasa_rec=normsasa, #apo
+             occl=occl,
              residue_idx=residue_idx,
              atmres_rec=atmres_rec,
              atmnames=atmnames, #[[],[],[],...]
@@ -127,7 +194,7 @@ def featurize_target_properties(pdb,npz,out,extrapath="",verbose=False):
 
 def gridize(xyzs_rec,xyzs_lig,
             xyzs_true,xyzs_fake,cats_true,
-            gridsize=2.0,
+            gridsize=2.0,sig=1.0,
             clash=1.0,padding=4.0,
             mode='box',
             out=None):
@@ -191,9 +258,10 @@ def gridize(xyzs_rec,xyzs_lig,
     indices_true = np.concatenate(kd_true.query_ball_tree(kd, gridsize))
     indices_true = np.array(np.unique(indices_true),dtype=np.int16)
 
+    # distance b/w grid & true-labeled-motifs
     dv2xyz = np.array([[g-x for g in grids[indices_true]] for x in xyzs_true]) # grids x numTrue
     d2xyz = np.sum(dv2xyz*dv2xyz,axis=2)
-    overlap = np.exp(-d2xyz/gridsize/gridsize)
+    overlap = np.exp(-d2xyz/sig/sig)
 
     N = 6 #cats_true.shape[1] -- hard-coded
     label = np.zeros((len(grids),N))
@@ -202,19 +270,20 @@ def gridize(xyzs_rec,xyzs_lig,
     for o,cat in zip(overlap,cats_true): # motif index
         for j,p in enumerate(o): # grid index
             if p > 0.01:
-                label[indices_true[j],cat] = np.sqrt(p)
+                label[indices_true[j],cat] = max(label[indices_true[j],cat],np.sqrt(p))
+                #label[indices_true[j],cat] = np.sqrt(p) #buggy version!
 
     nlabeled = 0
     for i,l in enumerate(label):
         grid = grids[i]
         if max(l) > 0.01:
-            imotif = np.argmax(l)
-            B = np.sqrt(max(l))
-            nlabeled += 1
-            mname = ['H','CB','CA','CD','CH','CR'][imotif]
-             
-            if out != None:
-                out.write("HETATM %4d  %2s  %2s  X%4d    %8.3f%8.3f%8.3f  1.00  %5.2f\n"%(i,mname,mname,i,grid[0],grid[1],grid[2],B))
+            imotif = np.where(l>0.01)[0]
+            for j in imotif:
+                B = np.sqrt(l[j])
+                nlabeled += 1
+                mname = ['H','CB','CA','CD','CH','CR'][j]
+                if out != None:
+                    out.write("HETATM %4d  %2s  %2s  X%4d    %8.3f%8.3f%8.3f  1.00  %5.2f\n"%(i,mname,mname,i,grid[0],grid[1],grid[2],B))
         else:
             if out != None:
                 out.write("HETATM %4d  H   H   X%4d    %8.3f%8.3f%8.3f  1.00  %5.2f\n"%(i,i,grid[0],grid[1],grid[2],0.0))
@@ -264,14 +333,23 @@ def read_mol2(mol2f):
 
     xyz_lig = np.array(molecule.xyz)
     atypes_lig = [atm.aclass for atm in molecule.atms]
+    bases = [atm.root for atm in molecule.atms]
+
+    vbase_lig = [np.array(molecule.xyz[i])-np.array(molecule.xyz[b]) for i,b in enumerate(bases)]
+    vbase_lig = np.array([v/(np.linalg.norm(v)+0.001) for v in vbase_lig])
     
-    return xyz_lig, atypes_lig, molecule.atms_aro
+    anames_lig = np.array([atm.name for atm in molecule.atms])
     
-def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_lig, mode='gen', debug=False):
+    return xyz_lig, atypes_lig, molecule.atms_aro, vbase_lig, anames_lig
+    
+def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_lig, vbase_lig,
+                            anames_lig,
+                            mode='gen', debug=False, outprefix=''):
+
     # ligand -- gentype
     if mode == 'gen':
-        donorclass_gen = [21,22,23,25,27,28,31,32,34,43]
-        acceptorclass_gen = [22,26,33,34,36,37,38,39,41,42,43,47]
+        donorclass_gen = [21,22,23,25,27,28,31,32,34,43] 
+        acceptorclass_gen = [22,26,30,33,34,36,37,38,39,41,42,43,47]
         aliphaticclass_gen = [3,4] #3: CH2, 4: CH3; -> make [4] to be more strict (only CH3)
 
         D_lig = [i for i,at in enumerate(atypes_lig) if at in donorclass_gen]
@@ -290,7 +368,7 @@ def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_l
     #acceptorclass_aa = ['OH','OOC','OCbb','ONH2','Nhis']
     #HRclass_aa = ['CH3','CH2','aroC','CH0','Nhis','Ntrp']
     
-    donorclass_aa = ['Ohx','Nad','Nim','Ngu1','Ngu2','Nam']
+    donorclass_aa = ['Ohx','Nad','Nim','Ngu1','Ngu2','Nam','Ca2p','Mg2p','Mn','Fe2p','Zn2p','Co2p','Cu2p','Ni','Cd'] #metals are considerec Ca2p anyways...
     acceptorclass_aa = ['Oad','Oat','Ohx','Nin']
     HRclass_aa = ['CS3','CS2','CR','CRp']
 
@@ -304,17 +382,46 @@ def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_l
     
     kd_lig  = scipy.spatial.cKDTree(xyzs_lig)
 
-    iA = np.unique(np.concatenate(kd_D.query_ball_tree(kd_lig,3.3)).astype(int)) #any ligatm close to receptor donor
-    iD = np.unique(np.concatenate(kd_A.query_ball_tree(kd_lig,3.3)).astype(int))
-    iHR = np.unique(np.concatenate(kd_HR.query_ball_tree(kd_lig,5.0)).astype(int))
+    # not super fast but okay
+    dv2D = np.array([[y-x for x in xyzs_lig] for y in xyz_rec[D_rec]])
+    dv2A = np.array([[y-x for x in xyzs_lig] for y in xyz_rec[A_rec]])
+
+    d2D = np.sqrt(np.einsum('ijk,ijk->ij',dv2D,dv2D))
+    d2A = np.sqrt(np.einsum('ijk,ijk->ij',dv2A,dv2A))
+
+    o2D = np.einsum('jk,ijk->ij', vbase_lig, dv2D)/d2D
+    o2A = np.einsum('jk,ijk->ij', vbase_lig, dv2A)/d2A
+
+    iA = np.where(((d2D<3.6)*(o2D>0.2588))>0.99)[1] # allow up to 105'
+    iD = np.unique(np.where(d2A<3.6)[1])
+
+    #print(atypes_rec[D_rec[-1]], xyz_rec[D_rec[-1]])
+    #iA = np.unique(np.concatenate(kd_D.query_ball_tree(kd_lig,3.5)).astype(int)) #any ligatm close to receptor donor
+    #iD = np.unique(np.concatenate(kd_A.query_ball_tree(kd_lig,3.5)).astype(int))
+    #print(iA, anames_lig[iA])
+
+    iHR = np.unique(np.concatenate(kd_HR.query_ball_tree(kd_lig,5.1)).astype(int))
 
     xyzs_m = []
     motifs = []
     for i,xyz in enumerate(xyzs_lig):
         mtype = 0
+<<<<<<< HEAD
         if (i in iA or i in iD) and (i in A_lig and i in D_lig): mtype = 1 #Both
         elif (i in iA and i not in iD) and (i in A_lig): mtype = 2 # Acc
         elif (i not in iA and i in iD) and (i in D_lig): mtype = 3 # Don
+=======
+        # let mutually exclusive
+        if (i in iA or i in iD) and (i in A_lig and i in D_lig): mtype = 1 #Both
+
+        #buggy
+        #elif (i in iA and i not in iD) and (i in A_lig): mtype = 2 # Acc
+        #elif (i not in iA and i in iD) and (i in D_lig): mtype = 3 # Don
+
+        #new -- don't mind if lig-acceptor is close to rec-acceptor & vice versa for donor
+        elif (i in iA) and (i in A_lig): mtype = 2 # Acc
+        elif (i in iD) and (i in D_lig): mtype = 3 # Don
+>>>>>>> 15417326d059c04c265f25120b6b8bdadc7305af
         elif i in H_lig and i in iHR: mtype = 4 # Ali
         elif i in R_lig and i in iHR: mtype = 5 # Aro
 
@@ -323,6 +430,13 @@ def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_l
                 print(i, atypes_lig[i], xyz, mtype)
             motifs.append(mtype)
             xyzs_m.append(xyz)
+
+    if debug:
+        out = open('%s.motif.xyz'%outprefix,'w')
+        aname = ['X','B','O','N','C','R']
+        for x,m in zip(xyzs_m,motifs):
+            out.write('%-4s %8.3f %8.3f %8.3f\n'%(aname[m],x[0],x[1],x[2]))
+        out.close()
 
     return np.array(xyzs_m), motifs
 
@@ -369,11 +483,11 @@ def main(recpdb,
     _xyzs_rec, _aas_rec, _atmres_rec, _atypes_rec, _charge_rec, _bnds_rec, _sasa_rec, _residue_idx, _repsatm_idx, reschains, reschains_idx, atmnames = args
 
     if ligmol2 != '':
-        xyzs_lig, atypes_lig, aroatms_lig = read_mol2(ligmol2)
+        xyzs_lig, atypes_lig, aroatms_lig, vbase_lig, anames_lig = read_mol2(ligmol2)
         if len(xyzs_lig) == 0: return
         xyzs_rec = _xyzs_rec #nothing to subsel
         atypes_rec = _atypes_rec  #nothing to subsel
-        gridmode = 'box'
+        gridmode = 'smart'
         atypemode = 'gen'
         
     elif hotspot != []:
@@ -394,8 +508,10 @@ def main(recpdb,
         return
 
     xyzs_motif, cats_motif = get_motifs_from_complex(xyzs_rec, atypes_rec,
-                                                     xyzs_lig, atypes_lig, aroatms_lig, mode=atypemode,
-                                                     debug=debug)
+                                                     xyzs_lig, atypes_lig, aroatms_lig, vbase_lig,
+                                                     anames_lig,
+                                                     mode=atypemode,
+                                                     debug=debug,outprefix=outprefix)
     
     if xyzs_motif.shape[0] == 0: return
     
@@ -417,12 +533,13 @@ if __name__ == "__main__":
     #trainlist = [l[:-1] for l in open(sys.argv[1])]
     #for tag in tags:
     #    main(tag)
+    mode = 'ligand'
     if mode == 'ligand':
         recpdb = sys.argv[1]
         ligmol2 = sys.argv[2]
         prefix = sys.argv[3]
 
-        main(pdb,mol2,inputpath='./',outprefix=t,gridsize=1.5,
+        main(recpdb,ligmol2,inputpath='./',outprefix=prefix,gridsize=1.5,
              padding=5.0,verbose=True,debug=True)
 
     elif mode == 'hotspot':

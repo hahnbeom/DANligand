@@ -341,8 +341,8 @@ def train_one_epoch(model,optimizer,loader,rank,epoch,is_train):
                         Pbind = ['%4.2f'%float(a) for a in torch.sigmoid(aff[0])]
 
                         key = 'PDB'
-                        if : key = 'CHEMBL'
-                        elif : key = 'DUDE'
+                        if info['ligands'][0][0].startswith('CHEMBL') and pnames[0][0] in ['O','P','Q']: key = 'CHEMBL'
+                        elif info['ligands'][0][0].startswith('CHEMBL'): key = 'DUDE'
 
                         Pt[key].append(Pbind[0])
                         Pf[key] += Pbind[1:]
