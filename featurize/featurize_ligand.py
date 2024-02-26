@@ -267,11 +267,11 @@ def read_mol2(mol2f):
     
     return xyz_lig, atypes_lig, molecule.atms_aro
     
-def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_lig, mode='gen'):
+def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_lig, mode='gen', debug=False):
     # ligand -- gentype
     if mode == 'gen':
         donorclass_gen = [21,22,23,25,27,28,31,32,34,43]
-        acceptorclass_gen = [22,26,33,34,36,37,38,39,40,41,42,43,47]
+        acceptorclass_gen = [22,26,33,34,36,37,38,39,41,42,43,47]
         aliphaticclass_gen = [3,4] #3: CH2, 4: CH3; -> make [4] to be more strict (only CH3)
 
         D_lig = [i for i,at in enumerate(atypes_lig) if at in donorclass_gen]
@@ -284,12 +284,12 @@ def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_l
         A_lig = [i for i,at in enumerate(atypes_lig) if at in [1,2]]
         H_lig = [i for i,at in enumerate(atypes_lig) if at==4]
         R_lig = [i for i,at in enumerate(atypes_lig) if at==5]
-        
 
     # receptor -- AA type
     #donorclass_aa = ['OH','Nlys','NH2O','Ntrp','Narg','NtrR','Nbb']
     #acceptorclass_aa = ['OH','OOC','OCbb','ONH2','Nhis']
     #HRclass_aa = ['CH3','CH2','aroC','CH0','Nhis','Ntrp']
+    
     donorclass_aa = ['Ohx','Nad','Nim','Ngu1','Ngu2','Nam']
     acceptorclass_aa = ['Oad','Oat','Ohx','Nin']
     HRclass_aa = ['CS3','CS2','CR','CRp']
@@ -312,14 +312,15 @@ def get_motifs_from_complex(xyz_rec, atypes_rec, xyzs_lig, atypes_lig, aroatms_l
     motifs = []
     for i,xyz in enumerate(xyzs_lig):
         mtype = 0
-        #print(i,atypes_lig[i],int(i in iA), int(i in iD), int(i in A_lig), int(i in D_lig))
-        if (i in iA or i in iD) and (i in A_lig and i in D_lig): mtype = 1
-        elif (i in iA and i not in iD) and (i in A_lig): mtype = 2
-        elif (i not in iA and i in iD) and (i in D_lig): mtype = 3
-        elif i in H_lig and i in iHR: mtype = 4
-        elif i in R_lig and i in iHR: mtype = 5
+        if (i in iA or i in iD) and (i in A_lig and i in D_lig): mtype = 1 #Both
+        elif (i in iA and i not in iD) and (i in A_lig): mtype = 2 # Acc
+        elif (i not in iA and i in iD) and (i in D_lig): mtype = 3 # Don
+        elif i in H_lig and i in iHR: mtype = 4 # Ali
+        elif i in R_lig and i in iHR: mtype = 5 # Aro
 
         if mtype > 0:
+            if debug:
+                print(i, atypes_lig[i], xyz, mtype)
             motifs.append(mtype)
             xyzs_m.append(xyz)
 
@@ -331,6 +332,7 @@ def main(recpdb,
          gridsize=1.5,
          padding=4.0,
          verbose=False,
+         debug=False,
          out=sys.stdout,
          inputpath = './',
          propout=None,
@@ -392,7 +394,8 @@ def main(recpdb,
         return
 
     xyzs_motif, cats_motif = get_motifs_from_complex(xyzs_rec, atypes_rec,
-                                                     xyzs_lig, atypes_lig, aroatms_lig, mode=atypemode)
+                                                     xyzs_lig, atypes_lig, aroatms_lig, mode=atypemode,
+                                                     debug=debug)
     
     if xyzs_motif.shape[0] == 0: return
     
@@ -417,7 +420,10 @@ if __name__ == "__main__":
     if mode == 'ligand':
         recpdb = sys.argv[1]
         ligmol2 = sys.argv[2]
-        main(recpdb,ligmol2,verbose=True)
+        prefix = sys.argv[3]
+
+        main(pdb,mol2,inputpath='./',outprefix=t,gridsize=1.5,
+             padding=5.0,verbose=True,debug=True)
 
     elif mode == 'hotspot':
         for l in open(txt):

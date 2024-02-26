@@ -180,7 +180,7 @@ def read_pdb(pdb,read_ligand=False,aas_allowed=[],
             atms[reschain] = []
         #if 'LG1' in l[30:54]:
         #    l = l.replace('LG1','000')
-        xyz[reschain][atm] = [float(l[30:38]),float(l[38:46]),float(l[46:54])]
+        xyz[reschain][atm] = np.array([float(l[30:38]),float(l[38:46]),float(l[46:54])])
         atms[reschain].append(atm)
 
     return resnames, reschains, xyz, atms
@@ -257,7 +257,7 @@ def fa2gentype(fats):
     return gents
 
 def defaultparams(aa,
-                  datapath='/applic/rosetta/current/database/chemical/residue_type_sets/fa_standard/residue_types',
+                  datapath='/applic/Rosetta/database/chemical/residue_type_sets/fa_standard/residue_types',
                   extrapath=''):
     # first search through Rosetta database
     p = None

@@ -7,6 +7,7 @@ from rdkit import Chem
 from rdkit.Chem.BRICS import BRICSDecompose, BreakBRICSBonds
 import random
 import multiprocessing as mp
+import tempfile
 
 OBABEL = 'obabel'
 
@@ -54,7 +55,7 @@ def get_atom_lines(mol2_file):
 
     return lines[first_atom_idx:last_atom_idx+1]
 
-def select_atm_from_frag(mol2file,frag_atm_list):
+def xyz_from_mol2(mol2):
     coordinates = []
     atms = []
     lines = get_atom_lines(mol2file)
@@ -69,11 +70,15 @@ def select_atm_from_frag(mol2file,frag_atm_list):
                coordinates.append(R)
                atms.append([atm,R])
     center = np.average(np.array(coordinates),axis=0)
+
+def select_atm_from_frag(xyz,frag_atm_list):
     min_dist_to_center = None
     selected_atm = None
+    center = np.zero(3)
+    
     for atm in atms:
         atm_R = atm[1]
-        distance = dist(atm_R,center)
+        distance = dist(xyz,center)
         if min_dist_to_center == None:
             min_dist_to_center = distance
             selected_atm = atm[0].strip()
@@ -98,6 +103,40 @@ def select_random_atm(mol2file, pre_selected_atms):
     selected = pre_selected_atms+(random.sample(atm_pool,tobe_selected))
     return selected
 
+def frag_from_pdb(pdb, mol2xyz, trg):
+    BRICSfragments = retrieve_frag_name(pdb)
+
+    if BRICSfragments == None:
+        print (i, trg)
+        return
+
+    key_atm_list = []
+    for fragno in BRICSfragments:
+        fragatms = BRICSfragments[fragno]
+        selected_atm = select_atm_from_frag(mol2xyz, fragatms)
+        key_atm_list.append(selected_atm)
+
+    if len(BRICSfragments) < 4:
+        key_atm_list = select_random_atm(mol2, key_atm_list)
+
+    KEYATOMS[trg] = key_atm_list
+
+    return KEYATOMS
+
+def split_pdb(pdb, workpath):
+    ligpdbs = []
+    
+    for l in open(pdb):
+        if l.startswith('COMPND'):
+            tag = l[:-1].split()[-1]
+            ligpdb = '%s.pdb'%tag
+            ligpdbs.append([tag,ligpdbs])
+            out = open(workpath+'/%s.pdb'%tag,'w')
+        if l.startswith('ENDMDL'):
+            out.close()
+        if l.startswith('ATOM') or l.startswith('CONECT'):
+            out.write(l)
+    return ligpdbs
 
 ##############################
 # save key atoms using BRICS #
@@ -115,25 +154,20 @@ def main(mol2s):
 
         # use obabel instead
         os.system(f'{OBABEL} {mol2} -O {ligpdb} 2>/dev/null') 
-        
-        BRICSfragments = retrieve_frag_name(ligpdb)
 
-        if BRICSfragments == None:
-            print (i, trg)
-            continue
+        is_multi = len(os.popen('grep ^MODEL %s'%ligpdb).readlines())>0
+        if is_multi:
+            workpath = tempfile.mkdtemp()
+            ligpdbs = split_pdb(ligpdb, workpath)
 
-        key_atm_list = []
-        for fragno in BRICSfragments:
-            fragatms = BRICSfragments[fragno]
-            selected_atm = select_atm_from_frag(mol2, fragatms)
-            key_atm_list.append(selected_atm)
-
-        if len(BRICSfragments) < 4:
-            key_atm_list = select_random_atm(mol2, key_atm_list)
-
-        KEYATOMS[trg] = key_atm_list
-
-    return KEYATOMS
+            print("?",ligpdbs)
+            for pdb,trg in ligpdbs:
+                frag_from_pdb(pdb,trg)
+            os.system('rm -rf %s'%workpath)
+            
+        else:
+            frag_from_pdb(ligpdb,trg)
+            
 
 def launch(mol2s,N=10,save_separately=True,collated_npz='keyatom.def.npz'):
     a = mp.Pool(processes=N)
@@ -142,7 +176,7 @@ def launch(mol2s,N=10,save_separately=True,collated_npz='keyatom.def.npz'):
     for i,m in enumerate(mol2s):
         mol2s_split[i%N].append(m)
 
-    main(mol2s_split[0])
+    #main(mol2s_split[0])
     
     ans = a.map(main, mol2s_split)
     keyatms = {}
@@ -163,7 +197,9 @@ if __name__ == "__main__":
     N = 5
     if len(sys.argv) > 3:
         N = int(sys.argv[3])
-    launch(mol2s,N,save_separately=True)
+    #launch(mol2s,N,save_separately=True)
     
     # for saving multiple ligand into a single keynpz
-    #launch(mol2s,N,save_separately=False,collated_npz='keyatom.def.npz')
+    launch(mol2s,N,save_separately=False,collated_npz='keyatom.def.npz')
+
+    
