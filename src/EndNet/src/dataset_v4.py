@@ -131,8 +131,8 @@ class DataSet(torch.utils.data.Dataset):
             mask = torch.tensor(mask).float()
 
         origin = None
-        #try:
-        if True:
+        try:
+        #if True:
             t2 = time.time()
             if is_ligand:
                 gridchain = None
@@ -174,8 +174,8 @@ class DataSet(torch.utils.data.Dataset):
                 print(f"Receptor num edges {Grec.number_of_edges()} exceeds max cut {self.maxedge}")
                 return NullArgs
 
-        else:
-        #except:
+        #else:
+        except:
             print("failed to read %s"%target)
             return NullArgs
         

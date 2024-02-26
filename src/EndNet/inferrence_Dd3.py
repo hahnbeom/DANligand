@@ -34,7 +34,7 @@ set_params={
     'edgedist'     : (2.2,4.5), # grid: 18 neighs -- exclude cube-edges
     'edgemode'     : 'topk',
     'edgek'        : (8,16),
-    "randomize"    : 0.2, # Ang, pert the rest
+    "randomize"    : 0.0, # Ang, pert the rest
     #"randomize_lig": 0.5, # Ang, pert the motif coord! #reduce noise...
     "ntype"        : NTYPES,
     'debug'        : ('-debug' in sys.argv),
@@ -272,7 +272,8 @@ def train_one_epoch(model,loader,rank,epoch,report_attn):
                 
                 MotifP = torch.sigmoid(MotifP) # Then convert to sigmoid (0~1)
                 MotifPs = [MotifP] # assume batchsize=1
-                
+
+                #print(pnames, MotifP[0], aff, cats)
                 if cats != None:
                     cats = to_cuda(cats, device)
                     masks = to_cuda(masks, device)

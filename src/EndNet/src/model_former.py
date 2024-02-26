@@ -208,7 +208,6 @@ class EndtoEndModel(nn.Module):
         h_key_batched = torch.einsum('bkj,bjd->bkd',key_batched,h_lig_batched)
         D_key  = get_pair_dis_one_hot(key_x_batched, bin_size=2, bin_min=-1, num_classes=self.d).float()
         
-        #print(h_key_batched[0], h_key_batched[1])
         # vars up to here
         z = torch.einsum( 'bkj,bijd->bikd', key_batched, z)
 
@@ -239,5 +238,5 @@ class EndtoEndModel(nn.Module):
         # 2-2) screening module
         aff = self.class_module( z, h_grid_batched, h_key_batched,
                                  lig_rep=h_lig_global, w_mask=key_mask )
-            
+
         return Ykey_s, z_norm, cs, aff
