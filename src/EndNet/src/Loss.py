@@ -2,6 +2,16 @@ import torch
 
 ScreeningLoss = torch.nn.BCEWithLogitsLoss()
 
+def ScreeningLossW( aff, label, weight=None ):
+    lossfunc = torch.nn.BCEWithLogitsLoss( reduction='none' )
+    loss = lossfunc( aff, label )
+    if weight != None:
+        loss = weight*loss
+
+    #print( aff, label, lossfunc( aff, label ), loss)
+
+    return loss.mean()
+
 # null gives ~ 0.1 when n == 5;  p=(0.5,0.0...) -> loss ~ 0.0275; p=(0.0,1.0,0.0...) -> loss ~ 0.25; 
 def RankingLoss( ps, qs ): #p: pred q:
     eps = 1.0e-6
@@ -21,6 +31,17 @@ def ScreeningContrastLoss( embs, blabel, nK ):
 
     return loss
 
+''' unused
+def AffinityLoss( pred, label ):
+    func = torch.nn.HuberLoss()
+
+    # map -inf~15 -> 0~11.5
+    # y=1 at x=0; y=4 at x=4)
+    pred = 12.0/(1.0+torch.exp(-pred+2.0)) 
+    loss = func( pred, label )
+    return loss
+'''
+    
 ### loss calculation functions
 def grouped_cat(cat):
     import src.src_Grid.motif as motif
@@ -104,7 +125,7 @@ def ContrastLoss(preds,masks):
 
 def structural_loss( Yrec, Ylig, nK, opt='mse' ):
     # Yrec: BxKx3 Ylig: K x 3
-    
+
     dY = Yrec[0,:nK[0],:] - Ylig[0] # hack
 
     N = 1
@@ -118,6 +139,25 @@ def structural_loss( Yrec, Ylig, nK, opt='mse' ):
     mae = torch.sum(torch.abs(dY))/nK[0] # this is correct mae...
 
     return loss1_sum, mae
+
+def distance_loss( Dpred, X, nK, bin_min = -1, bin_size=0.5, bin_max=30 ):
+    # make label first
+    #X: label coordinate
+    pair_dis = torch.cdist(X, X, compute_mode='donot_use_mm_for_euclid_dist')
+    pair_dis[pair_dis>bin_max] = bin_max
+    pair_dis_bin_index = torch.div(pair_dis - bin_min, bin_size, rounding_mode='floor').long()
+    pair_dis_one_hot = torch.nn.functional.one_hot(pair_dis_bin_index, num_classes=Dpred.shape[-1]).float()
+
+    LossFunc = torch.nn.CrossEntropyLoss(reduction='sum')
+    loss = torch.tensor(0.0).to(X.device)
+    for pred,label,k in zip(Dpred,pair_dis_one_hot,nK):
+        # move channel dimension (2nd) to 1st dim
+        pred = pred[:k,:k,:].transpose(1,2)
+        label = label[:k,:k,:].transpose(1,2)
+        loss1 = LossFunc(pred, label)
+        loss = loss + loss1
+        #print(loss1, torch.argmax(pred[:k,:k,:],dim=-1), torch.argmax(label[:k,:k,:],dim=-1))
+    return loss
 
 ###
 def spread_loss(Ylig, A, grid, nK, sig=2.0): #Ylig:label(B x K x 3), A:attention (B x Nmax x K), grid: B x Nmax x 3

@@ -416,7 +416,8 @@ def read_mol2_batch(mol2,tags_read=None,drop_H=True,tag_only=False,):
         tags_order = [tag for tag in tags_read if tag in tags] # reorder following input
     else:
         tags_order = tags
-        
+
+    
     if not tag_only:
         elems_s   = [elems_s[tag] for tag in tags_order if tag in tags]
         qs_s      = [qs_s     [tag] for tag in tags_order if tag in tags]
@@ -426,7 +427,7 @@ def read_mol2_batch(mol2,tags_read=None,drop_H=True,tag_only=False,):
         nneighs_s = [nneighs_s[tag] for tag in tags_order if tag in tags]
         atms_s    = [atms_s   [tag] for tag in tags_order if tag in tags]
         atypes_s  = [atypes_s [tag] for tag in tags_order if tag in tags]
-    
+
     return elems_s, qs_s, bonds_s, borders_s, xyzs_s, nneighs_s, atms_s, atypes_s, tags_order
 
 def read_mol2s_xyzonly(mol2):
@@ -457,7 +458,17 @@ def read_mol2s_xyzonly(mol2):
 
     return np.array(xyzs), atms
 
-
+def affinity2weight(aff):
+    import torch
+    
+    weight = torch.zeros_like(aff).to(aff.device)
+    for i,val in enumerate(aff):
+        if val < 0:
+            weight[i] = 1.0
+        else:
+            f = min(max(0,val-3.0),9.0)/3.0 # linear scale 3~12 -> 0~3
+            weight[i] = f
+    return weight
 
 # z = np.load('../fortest.npy')[4]
 # show_how_attn_moves(z, epoch=14)

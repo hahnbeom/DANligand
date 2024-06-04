@@ -5,7 +5,7 @@ import torch.utils.checkpoint as checkpoint
 from SE3.se3_transformer.model import SE3Transformer
 from SE3.se3_transformer.model.fiber import Fiber
 from src.trigon_2 import *
-#from src.GAT import GATLayer
+from src.GAT import GATLayer
 from dgl.nn import EGATConv
 
 class Grid_SE3(nn.Module):
@@ -338,21 +338,27 @@ class ClassModule( nn.Module ):
             Aff = self.final_linear(pair_rep).squeeze(-1) # b x 1
             
         elif self.classification_mode.startswith('former_contrast'):
-            exp_z = torch.exp(z) 
-            zg_denom = exp_z.sum(axis=(-2)).unsqueeze(-2) # b x N x 1 x d
-            zg = torch.div(exp_z,zg_denom) # b x N x K x d; "per-NK weight, receptor version"
-            zk_denom = exp_z.sum(axis=(-3)).unsqueeze(-3) # b x N x 1 x d
-            zk = torch.div(exp_z,zk_denom) # b x N x K x d; "per-NK weight, ligand version"
+            eps = 1.0e-9
+            exp_z = torch.exp(z)
+
+            # "per-NK weight, Grid version"
+            zg_denom = exp_z.sum(axis=(-2)).unsqueeze(-2) + eps # b x N x 1 x d
+            zg = torch.div(exp_z,zg_denom) # b x N x K x d; 
+
+            # "per-NK weight, ligKey version"
+            zk_denom = exp_z.sum(axis=(-3)).unsqueeze(-3) # b x 1 x K x d
+            zk = torch.div(exp_z,zk_denom) + eps # b x N x K x d; 
             #zl = torch.sum( ) # b x N 
             
-
             if self.classification_mode == 'former_contrast2':
-                Affmap = self.Affmap / torch.sum(self.Affmap) # normalize so that sum be channel-dimx
+                Affmap = self.Affmap / (torch.sum(self.Affmap) + eps)# normalize so that sum be channel-dimx
             else:
-                Affmap = self.Affmap / torch.mean(self.Affmap) # normalize so that sum be channel-dimx
-            # normalized embedding
-            hs_grid_batched = torch.softmax(hs_grid_batched, axis=-1)
-            hs_key_batched  = torch.softmax(hs_key_batched, axis=-1)
+                Affmap = self.Affmap / (torch.mean(self.Affmap) + eps)# normalize so that sum be channel-dimx
+                
+            # normalized embedding across channel dim
+            # rethink!
+            hs_grid_batched = torch.softmax(hs_grid_batched, axis=-1) # B x N x d
+            hs_key_batched  = torch.softmax(hs_key_batched, axis=-1) # B x K x d
                 
             # derive dot product to binders to be at 1.0, non-binders at 0.0
             Aff_contrast = torch.einsum( 'bkd,d->bk', hs_key_batched, Affmap ) # B x k

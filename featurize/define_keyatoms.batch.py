@@ -9,7 +9,13 @@ import random
 import multiprocessing as mp
 import tempfile
 
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
+
 OBABEL = 'obabel'
+l = os.popen('obabel 2>/dev/null').read()
+if not l.startswith('Open Babel 3.1.0'):
+    sys.exit('obabel not installed or path unfound')
 
 #######################
 # function definition #
@@ -243,5 +249,7 @@ if __name__ == "__main__":
     #launch(mol2s,N,save_separately=False,collated_npz='%s.keyatom.def.npz'%(mol2s[0].split('.')[0]))
 
     # option3. if mol2 is a batch mol2
-    launch_batch_mol2(mol2s[0],N,collated_npz='%s.keyatom.def.npz'%(mol2s[0].split('.')[0]))
+    for mol2 in mol2s:
+        launch_batch_mol2(mol2,N,collated_npz='%s.keyatom.def.npz'%(mol2.split('.')[0]))
+        #launch_batch_mol2(mol2s[0],N,collated_npz='%s.keyatom.def.npz'%(mol2s[0][:-5]))
 

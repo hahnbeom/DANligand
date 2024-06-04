@@ -149,11 +149,11 @@ class TriangleSelfAttentionRowWise(torch.nn.Module):
 
 class Transition(torch.nn.Module):
     # separate left/right edges (block1/block2).
-    def __init__(self, embedding_channels=256, n=4):
+    def __init__(self, embedding_channels=256, n=4, bias=True):
         super().__init__()
         self.layernorm = torch.nn.LayerNorm(embedding_channels)
-        self.linear1 = Linear(embedding_channels, n*embedding_channels)
-        self.linear2 = Linear(n*embedding_channels, embedding_channels)
+        self.linear1 = Linear(embedding_channels, n*embedding_channels, bias=bias)
+        self.linear2 = Linear(n*embedding_channels, embedding_channels, bias=bias)
     def forward(self, z):
         # z of shape b, i, j, embedding_channels, where i is protein dim, j is compound dim.
         z = self.layernorm(z)

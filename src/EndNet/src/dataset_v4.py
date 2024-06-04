@@ -12,6 +12,8 @@ import src.types as types
 import src.myutils as myutils
 import src.kappaidx as kappaidx
 
+MYPATH = os.path.dirname(os.path.abspath(__file__))
+
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, targets,
                  is_ligand,
@@ -32,6 +34,9 @@ class DataSet(torch.utils.data.Dataset):
                  load_cross=False,
                  cross_eval_struct=False,
                  nonnative_struct_weight=0.2,
+                 cross_grid=0.0,
+                 keyatomf = 'keyatom.def.npz',
+                 affinityf = None,
                  debug=False):
         
         self.targets = targets
@@ -61,17 +66,27 @@ class DataSet(torch.utils.data.Dataset):
         self.drop_H = drop_H
         self.crossactives = []
         self.cross_eval_struct = cross_eval_struct
+        self.cross_grid = cross_grid
         self.nonnative_struct_weight = nonnative_struct_weight
+        self.keyatomf = keyatomf
         self.decoys = {}
         
-        if os.path.exists('data/crossreceptor.npz'):
-            self.crossactives = np.load('data/crossreceptor.npz',allow_pickle=True)['crossrec'].item()
+        if os.path.exists(MYPATH+'/../data/crossactives.npz'):
+            self.crossactives = np.load(MYPATH+'/../data/crossactives.npz',allow_pickle=True)['crossrec'].item()
 
         # pre-load
         for f in decoy_npzs:
-            if os.path.exists(f):
-                print("pre-load decoy npz file: "+f)
-                self.decoys[f] = np.load(f,allow_pickle=True)['decoys'].item()
+            if os.path.exists(MYPATH+'/../'+f):
+                print("pre-load decoy npz file: "+MYPATH+'/../'+f)
+                self.decoys[f] = np.load(MYPATH+'/../'+f,allow_pickle=True)['decoys'].item()
+
+        # affinity value
+        self.aff = {}
+        
+        if affinityf != None:
+            self.aff = np.load(MYPATH+'/../'+affinityf,allow_pickle=True)['aff'].item()
+            #print("?", list(self.aff))
+            print(f"affinity file found: reading {MYPATH}/../{affinityf}")
             
     def __len__(self):
         return len(self.targets)
@@ -92,6 +107,7 @@ class DataSet(torch.utils.data.Dataset):
         is_ligand = self.is_ligand[index]
 
         ligands, mol2f, mol2type, datatype = self.parse_ligands(target, self.ligands[index], parentpath)
+
         eval_struct = 0.0
         if datatype == 'structure':
             eval_struct = 1.0
@@ -100,11 +116,16 @@ class DataSet(torch.utils.data.Dataset):
         
         t1 = time.time()
 
-        keyatomf = parentpath+'/keyatom.def.npz' 
-        if not os.path.exists(keyatomf) and os.path.exists(parentpath+'/%s.keyatom.def.npz'%pname):
-            keyatomf = parentpath+'/%s.keyatom.def.npz'%pname
+        keyatomf = parentpath+'/'+self.keyatomf
+
+        if not os.path.exists(keyatomf):
+            if os.path.exists(parentpath+'/%s.%s'%(pname,self.keyatomf)):
+                keyatomf = parentpath+'/%s.%s'%(pname,self.keyatomf)
+            elif os.path.exists(self.datapath+'%s.%s'%(target,self.keyatomf)):
+                keyatomf = self.datapath+'%s.%s'%(target,self.keyatomf)
+                
         info = {'pname': pname}
-        Grec, Glig_list, cats, mask, keyxyz, keyidx_list, blabel_list = None, None, None, None, None, None, None
+        Grec, Glig_list, cats, mask, keyxyz, keyidx_list, blabel_list = None, [], None, None, None, None, None
         NullArgs = (None, None, None, None, None, None, info)
 
         # 0. read grid info
@@ -113,6 +134,31 @@ class DataSet(torch.utils.data.Dataset):
             return NullArgs
         
         # 1. condition on inferrence <-> train; ligand-info <-> protein only
+        # take grid info from cross (& label too)
+
+        gridminfo = self.datapath + target + '.gridm.npz'
+        if np.random.random() < self.cross_grid and os.path.exists(gridminfo):
+            gridinfo = gridminfo
+        else:
+            gridinfo = self.datapath + target + '.grid.npz'
+
+        '''
+        if pname not in self.crossactives:
+            pass
+        elif self.cross_grid > 0.0001 and len(self.crossactives[pname]) > 1:
+            if np.random.random() > self.cross_grid:
+                crossrecs = self.crossactives[pname]
+                recname = np.random.choice(crossrecs)
+                gridinfo = self.datapath + recname + '.grid.npz'
+                if not os.path.exists(gridinfo):
+                    gridinfo = self.datapath + recname.replace('GridNet.ligand','PDBbind').replace('GridNet.','') + '.grid.npz'
+                    
+                if not os.path.exists(gridinfo):
+                    gridinfo = gridinfo0
+            else:
+                pass
+        '''
+                
         sample = np.load(gridinfo, allow_pickle=True)
         grids  = sample['xyz'] #vector; set all possible motif positions for prediction
 
@@ -122,13 +168,16 @@ class DataSet(torch.utils.data.Dataset):
         
         #if self.labeled:
         cats, mask = None, None
-        if 'labels' in sample:
-            cats = sample['labels'] # ngrid x nmotif
-            if cats.shape[1] > self.ntype: cats = cats[:,:self.ntype]
-            mask = np.sum(cats>0,axis=1) #0 or 1
+        if 'labels' in sample or 'label' in sample:
+            if 'labels' in sample: cats = sample['labels'] # ngrid x nmotif
+            else: cats = sample['label'] # ngrid x nmotif
+
+            if len(cats) > 0:
+                if cats.shape[1] > self.ntype: cats = cats[:,:self.ntype]
+                mask = np.sum(cats>0,axis=1) #0 or 1
             
-            cats = torch.tensor(cats).float()
-            mask = torch.tensor(mask).float()
+                cats = torch.tensor(cats).float()
+                mask = torch.tensor(mask).float()
 
         origin = None
         try:
@@ -137,13 +186,14 @@ class DataSet(torch.utils.data.Dataset):
             if is_ligand:
                 gridchain = None
 
-                blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, origin = \
+                blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz = \
                     self.read_ligands(target, ligands, keyatomf, mol2path=mol2f,
                                       actives=[ligands[0]], mol2type=mol2type )
 
                 info['nK'] = [len(idx) for idx in keyidx_list]
                 info['ligands'] = ligands
                 info['atms'] = atms_list
+                info['gridinfo'] = gridinfo
 
             else:
                 gridchain = pname.split('.')[1]
@@ -152,7 +202,24 @@ class DataSet(torch.utils.data.Dataset):
 
             #if origin == None:
                 #origin = torch.zeros(3)
-            origin = torch.tensor(np.mean(grids,axis=0)) # orient around grid center
+
+            #override
+            origin = torch.tensor(np.mean(grids,axis=0)).float() # orient around grid center
+
+            '''
+            if gridinfo != gridinfo0:
+                grids0  = np.load(gridinfo0, allow_pickle=True)['xyz']
+                origin0 = torch.tensor(np.mean(grids0,axis=0)) # orient around grid center
+                if (origin0 - origin).norm() > 1.0:
+                    print("SANITY", gridinfo, gridinfo0, origin, origin0, origin-origin0)
+            '''
+
+            if Gnat == None:
+                #print("failed to fetch Gnat", pname)
+                pass
+            else:
+                Gnat.ndata['x'] = Gnat.ndata['x'] - origin
+                keyxyz = keyxyz - origin
 
             t3 = time.time()
             grids = grids - origin.squeeze().numpy()
@@ -164,20 +231,26 @@ class DataSet(torch.utils.data.Dataset):
                                                         gridchain=gridchain,
                                                         randomize=self.randomize,
                                                         features=self.input_features)
+
+            #if Gnat != None:
+            #    print(torch.mean(Gnat.ndata['x'],axis=0), np.mean(grids,axis=0))
             t4 = time.time()
 
             if Grec == None:
-                print(f"Receptor num nodes exceeds max cut 3000")
                 return NullArgs 
             
             elif Grec.number_of_edges() > self.maxedge or Grec.number_of_nodes() > self.maxnode:
                 print(f"Receptor num edges {Grec.number_of_edges()} exceeds max cut {self.maxedge}")
+                return NullArgs
+            
+            elif len(Glig_list) == 0:
                 return NullArgs
 
         #else:
         except:
             print("failed to read %s"%target)
             return NullArgs
+
         
         info['name'] = target
         info['com'] = origin
@@ -185,6 +258,12 @@ class DataSet(torch.utils.data.Dataset):
         info['grididx'] = np.where(Grec.ndata['attr'][:,0]==1)[0] #aa=unk type
         info['grid'] = grids
         info['eval_struct'] = eval_struct
+
+        info['aff'] = -torch.ones(len(blabel_list)) #assign -1 as unknown
+
+        if pname in self.aff and ligands[0].split('/')[-1] in self.aff[pname]:
+            info['aff'][0] = self.aff[pname][ligands[0].split('/')[-1]]
+        
         t9 = time.time()
         #print(target, t1-t0, t2-t1, t3-t2, t4-t3, t9-t0)
 
@@ -192,10 +271,10 @@ class DataSet(torch.utils.data.Dataset):
 
     def parse_ligands(self, target, ligands, parentpath):
         pname = target.split('/')[-1]
-
+ 
         if 'dock' in target:
             datatype = 'model'
-        elif '.ligand' in target or '.biolip' in target:
+        elif 'ligand' in target or 'biolip' in target or 'PDBbind' in target:
             datatype = 'structure'
         else:
             datatype = 'binding'
@@ -207,15 +286,19 @@ class DataSet(torch.utils.data.Dataset):
             if mol2type == 'single':  #"single-style"
                 if mol2f.endswith('.npz'): # random selection
                     Pself = float(activemol)
-                    #actives = np.load(mol2f,allow_pickle=True)['crossrec'].item()
-                    actives = [a.split('/')[-1].split('.')[0] for a in self.crossactives[pname]]
+                    
+                    if pname in self.crossactives and self.load_cross \
+                       and (np.random.rand() > Pself): 
+                        actives = [a.split('/')[-1] for a in self.crossactives[pname]]
 
-                    if self.load_cross and pname in actives and (np.random.rand() > Pself): 
+                        #if pname in actives: to ensure Gnat
+                        
                         active = [np.random.choice(actives)]
                         if self.cross_eval_struct:
                             datatype = 'model' #weight by nonnative_struct_weight
                         else:
                             datatype = 'binding' #don't eval struct
+                        #print("PARSE_LIG", target, active, pname, pname in actives, len(actives))
                     else:
                         active = [target] # self
                 else:
@@ -232,13 +315,11 @@ class DataSet(torch.utils.data.Dataset):
                 if activemol == 'random':
                     tags = myutils.read_mol2_batch(mol2f,tag_only=True)[-1]
                     active = [np.random.choice(tags)]
-                    #print(target, active)
             else:
                 sys.exit("no such mol2type known: %s"%mol2type)
                 
             t1 = time.time()
             if decoyf.endswith('.npz'):
-                #decoys = np.load(decoyf,allow_pickle=True)['decoys'].item()[pname]
                 if pname in self.decoys[decoyf]:
                     decoys = self.decoys[decoyf][pname]
                 elif activemol in self.decoys[decoyf]:
@@ -256,13 +337,13 @@ class DataSet(torch.utils.data.Dataset):
             mol2type = 'batch'
             mol2f_a = parentpath+'/%s.active.mol2'%pname
             mol2f = parentpath+'/%s.decoy.mol2'%pname #decoy only (or unknown)
-            
+
             if os.path.exists(mol2f_a):
                 active = myutils.read_mol2_batch(mol2f_a,tags_read=ligands[1:],tag_only=True)[-1]
                 active = [np.random.choice(active)] #one
             else:
                 active = []
-            
+
             if os.path.exists(mol2f):
                 decoys = myutils.read_mol2_batch(mol2f,tags_read=ligands[1:],tag_only=True)[-1] # override ligand
             else:
@@ -281,7 +362,7 @@ class DataSet(torch.utils.data.Dataset):
             decoys = ligands
 
         if len(decoys) > 1 and len(decoys) > self.max_subset-1:
-            decoys = list(np.random.choice(decoys,self.max_subset-1,replace=False))
+            decoys = list(np.random.choice(decoys,self.max_subset-len(active),replace=False))
 
         # active always comes first
         ligands = active + decoys
@@ -295,7 +376,6 @@ class DataSet(torch.utils.data.Dataset):
     def read_ligands(self, target, ligands, keyatomf, mol2path, actives=[], mol2type='single'):
         if mol2type == 'batch':
             Glig_list, Gnat_list, keyidx_list, atms_list, tags_read = self.read_by_batch_mol2(mol2path, keyatomf, tags=ligands)
-            origin = []
 
         else: #single
             Glig_list, Gnat_list, keyidx_list, atms_list, tags_read = self.read_by_single_mol2(target, ligands, keyatomf, mol2path=mol2path)
@@ -303,21 +383,17 @@ class DataSet(torch.utils.data.Dataset):
 
         blabel_list = [(1 if tag in actives else 0) for tag in tags_read]
         Gnat, keyxyz = None, None
-        origin = None
 
-        if len(actives) > 0:
-            inat = ligands.index(actives[0])
+        if len(actives) > 0 and actives[0] in tags_read:
+            inat = tags_read.index(actives[0])
             Gnat = Gnat_list[inat]
             
-            origin = torch.mean(Gnat.ndata['x'],axis=0) # 1,3
-            Gnat.ndata['x'] = Gnat.ndata['x'] - origin # move lig to origin
+            #Gnat.ndata['x'] = Gnat.ndata['x'] #- origin # move lig to origin
             keyxyz = Gnat.ndata['x'][keyidx_list[inat]] # K x 3
         else:
             keyxyz = torch.zeros((4,3))
-            #origin = torch.mean(Glig_list[0].ndata['x'],axis=0) # 1,3
 
-        #print(target, len(ligands), len(Glig_list))
-        return blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz, origin
+        return blabel_list, Glig_list, keyidx_list, atms_list, Gnat, keyxyz #, origin
 
     def read_by_single_mol2(self, target, ligands, keyatomf, mol2path):
         Glig_list = [] 
@@ -335,15 +411,22 @@ class DataSet(torch.utils.data.Dataset):
                 mol2 = mol2path
                 confmol2 = mol2path[:-5]+'.conformers.mol2'
             ## TODO: clean data name
-            elif 'GridNet.' not in lig and '.' in lig:
-                mol2 = mol2path+'/GridNet.biolip/'+lig+'.ligand.mol2'
-            elif 'GridNet.' not in lig:
-                mol2 = mol2path+'/GridNet.ligand/'+lig+'.ligand.mol2'
-            else:
-                mol2 = mol2path+'/'+lig+'.ligand.mol2'
+            mol2 = mol2path+'/'+lig+'.ligand.mol2'
+
+            # TODO: make as a function
+            if not os.path.exists(mol2):
+                if 'GridNet.' not in lig and '.' in lig:
+                    mol2 = mol2path+'/biolip/'+lig+'.ligand.mol2'
+                elif 'GridNet.' not in lig:
+                    mol2 = mol2path+'/PDBbind/'+lig+'.ligand.mol2'
+                    if not os.path.exists(mol2):
+                        mol2 = mol2path+'/PDBbind/'+lig+'.ligand.mol2'
+                elif 'GridNet.ligand' in lig:
+                    mol2 = mol2path+'/PDBbind/'+lig.split('/')[-1]+'.ligand.mol2'
+                elif 'GridNet.biolip' in lig:
+                    mol2 = mol2path+'/biolip/'+lig.split('/')[-1]+'.ligand.mol2'
 
             if confmol2 == None: confmol2 = mol2path+lig+'.conformers.mol2'
-            #print(lig,mol2,confmol2,self.pert, os.path.exists(confmol2))
             
             if not self.pert or not os.path.exists(confmol2):
                 confmol2 = None
@@ -362,8 +445,8 @@ class DataSet(torch.utils.data.Dataset):
             #if random.random() < self.noiseP:
             #    Glig, randoms = give_noise_to_lig(Glig)
 
-            com = torch.mean(Glig.ndata['x'],axis=0) # 1,3
-            Glig.ndata['x'] = Glig.ndata['x'] - com # move lig to origin
+            com = torch.mean(Glig.ndata['x'],axis=0).float() # 1,3
+            Glig.ndata['x'] = (Glig.ndata['x'] - com).float() # move lig to origin
                 
             keyidx = identify_keyidx(lig, atms, keyatomf)
 
@@ -410,8 +493,9 @@ class DataSet(torch.utils.data.Dataset):
                                              input_features=self.input_features,
                                              extras=extras)
             
-                com = torch.mean(Glig.ndata['x'],axis=0) # 1,3
-                Glig.ndata['x'] = Glig.ndata['x'] - com # move lig to origin
+                com = torch.mean(Glig.ndata['x'],axis=0).float() # 1,3
+                
+                Glig.ndata['x'] = (Glig.ndata['x'] - com).float() # move lig to origin
                 
                 atms_list.append(a)
                 
@@ -510,7 +594,9 @@ def make_atm_graphs(xyz, grids, obt_fs, bnds, atmnames,
     if CBonly:
         idx_ord = [i for i in idx_ord if atmnames[i] in ['N','CA','C','O','CB']]
 
-    if len(idx_ord) > maxnode: return 
+    if len(idx_ord) > maxnode:
+        print(f"Receptor num nodes exceeds max cut {maxnode}: {len(idx_ord)}")
+        return 
 
     xyz     = xyz[idx_ord]
     natm = xyz.shape[0]-grids.shape[0] # real atoms
@@ -652,7 +738,6 @@ def receptor_graph_from_motifnet(npz,K,dcut=1.8,mode='dist',top_k=8,debug=False)
     normD = normalize_distance(D,maxd=dcut)
     edgef = torch.tensor([normD[0,i,j] for i,j in zip(u,v)])[:,None]
     #edgef = torch.tensor([normD[0,u,v]])[:,None]
-    #print(f"extracted {edgef.shape} edge & {nodef.shape} node features")
 
     G.ndata['attr'] = nodef
     G.ndata['x'] = torch.tensor(xyz)[:,None,:]
@@ -699,7 +784,6 @@ def ligand_graph_from_mol2(mol2,dcut,
             
         args = read_mol2(mol2, drop_H=drop_H)
     except:
-        #args = myutils.read_mol2(mol2,drop_H=drop_H)
         print("failed to read mol2", mol2)
         return False, False, False
 
@@ -708,7 +792,6 @@ def ligand_graph_from_mol2(mol2,dcut,
 
     #if '3asx' in mol2: print(args)
     xyz_nat, atms = args[4], args[6]
-    #print(mol2, read_alt_conf, len(xyz_alt))
     
     if len(xyz_alt) > 1:
         ialt = min(np.random.randint(len(xyz_alt)),len(xyz_alt)-1)
@@ -718,7 +801,6 @@ def ligand_graph_from_mol2(mol2,dcut,
     extras = {}
     if input_features == 'graphex':
         f_ecfp = mol2.replace(mol2.split('/')[-1],'')+'/ecfp4.npz'
-        #print(mol2, f_ecfp, os.path.exists(f_ecfp))
         if os.path.exists(f_ecfp):
             bits = np.load(f_ecfp,allow_pickle=True)['bits'].item()
             tag = mol2.split('/')[-1][:-5]
@@ -780,7 +862,6 @@ def read_mol2(mol2, drop_H=False):
             xyzs.append([float(words[2]),float(words[3]),float(words[4])]) 
                 
         elif read_cont == 2:
-            # if words[3] == 'du' or 'un': print(mol2)
             bonds.append([int(words[1])-1,int(words[2])-1]) #make 0-index
             bondtypes = {'1':1,'2':2,'3':3,'ar':3,'am':2, 'du':0, 'un':0}
             borders.append(bondtypes[words[3]])
@@ -815,7 +896,6 @@ def generate_ligand_graph(args,
     dX = torch.unsqueeze(X,1) - torch.unsqueeze(X,2)
     u,v,d = find_dist_neighbors(dX,dcut=dcut,mode=mode,top_k=top_k)
 
-    #print(mode, u.shape, d.shape, top_k)
     Glig = dgl.graph((u,v))
 
     ## 1. node features
@@ -984,8 +1064,10 @@ def identify_keyidx(target, atms, keyatomf):
     if 'keyatms' in keyatoms:
         keyatoms = keyatoms['keyatms'].item()
 
+    #print(len(keyatoms), target in keyatoms)
     if target not in keyatoms: return False
-    
+
+    #print(target, keyatoms[target], atms)
     keyidx = [atms.index(a) for a in keyatoms[target] if a in atms]
 
     if len(keyidx) > 10:
@@ -1077,6 +1159,9 @@ def collate(samples):
             return 
         blabel = torch.tensor(s[6],dtype=float)
         info['nK'] = torch.tensor(info['nK'])
+        if 'aff' in info:
+            info['aff'] = info['aff'][0]
+        #print(info['aff'])
 
     else:
         Glig = None
